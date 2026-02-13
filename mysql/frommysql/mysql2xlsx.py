@@ -52,7 +52,9 @@ def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_pat
                 raise ValueError("테이블 스코프를 선택했을 경우, 'output_path' 인자는 필수입니다.")
                 
             print(f"▶ [mysql2xlsx] 테이블 '{table_name}' 데이터 조회 중...")
-            table_query = f"SELECT * FROM `{table_name}`"
+            # 간단한 SQL Injection 방지: 백틱 이스케이프
+            safe_table_name = table_name.replace("`", "``")
+            table_query = text(f"SELECT * FROM `{safe_table_name}`")
             df = pd.read_sql(table_query, con=engine)
             print(f"✅ [mysql2xlsx] 데이터 조회 완료: {df.shape[0]} rows, {df.shape[1]} columns")
             

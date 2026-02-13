@@ -48,6 +48,9 @@ class DataHandlerApp:
         if hasattr(self, 'log_text'):
              sys.stdout = TextRedirector(self.log_text)
 
+        # Force initial UI update to show Settings for default selection
+        self.update_ui()
+
     def center_window(self):
         self.root.update_idletasks()
         width = self.root.winfo_width()
@@ -103,7 +106,7 @@ class DataHandlerApp:
             'user': os.getenv(f"{prefix}MYSQL_USER"),
             'password': os.getenv(f"{prefix}MYSQL_PASSWORD"),
             'host': os.getenv(f"{prefix}MYSQL_HOST"),
-            'port': os.getenv(f"{prefix}MYSQL_PORT"),
+            'port': int(os.getenv(f"{prefix}MYSQL_PORT", 3306)),
             'database': db_name
         }
         
@@ -112,17 +115,64 @@ class DataHandlerApp:
              messagebox.showerror("Configuration Error", "Missing .env configuration for selected environment.")
              return None, None
 
+        # SSH Tunnel Support
+        self.tunnel = None
+        if self.var_prod.get() and os.getenv("SSH_HOST"):
+            try:
+                # Monkey-patch paramiko for compatibility with sshtunnel
+                import paramiko
+                if not hasattr(paramiko, 'DSSKey'):
+                    # Create a dummy class for DSSKey since it's removed in paramiko 3.0+
+                    class DSSKey: 
+                        pass
+                    paramiko.DSSKey = DSSKey
+
+                from sshtunnel import SSHTunnelForwarder
+                
+                ssh_host = os.getenv("SSH_HOST")
+                ssh_user = os.getenv("SSH_USER")
+                ssh_password = os.getenv("SSH_PASSWORD")
+                ssh_bind_port = int(os.getenv("SSH_BIND_PORT", 13306))
+                
+                # Create SSH Tunnel
+                # Note: remote_bind_address is where the SSH server connects to. 
+                # Since SSH server and DB are on the same machine (192.168.0.7), we use 127.0.0.1 here.
+                self.tunnel = SSHTunnelForwarder(
+                    (ssh_host, 22),
+                    ssh_username=ssh_user,
+                    ssh_password=ssh_password,
+                    remote_bind_address=('127.0.0.1', config['port']),
+                    local_bind_address=('127.0.0.1', ssh_bind_port),
+                    set_keepalive=10.0  # Keep connection alive
+                )
+                self.tunnel.start()
+
+                # Wait a bit for the tunnel to establish
+                import time
+                time.sleep(1.0)
+                
+                # Update config to use local forwarded port
+                config['host'] = '127.0.0.1'
+                config['port'] = ssh_bind_port
+                print(f"✅ SSH Tunnel Established: 127.0.0.1:{ssh_bind_port} -> {ssh_host} -> DB")
+                
+            except ImportError:
+                print("⚠️ sshtunnel module not found. Skipping SSH tunnel.")
+            except Exception as e:
+                messagebox.showerror("SSH Error", f"Failed to create SSH tunnel: {e}")
+                return None, None
+
         db_url = f"mysql+pymysql://{config['user']}:{config['password']}@{config['host']}:{config['port']}/{config['database']}?charset=utf8mb4"
         return db_url, config
 
     def run_process(self):
         """Execute MySQL Process"""
-        db_url, db_config = self.get_db_url_and_config()
-        if not db_url: return
-
-        mode = self.var_mode.get()
-        
         try:
+            db_url, db_config = self.get_db_url_and_config()
+            if not db_url: return
+
+            mode = self.var_mode.get()
+            
             if mode in ["mysql2xlsx", "mysql2pkl"]:
                 # Export operations
                 params = get_export_params(self.widgets)
@@ -183,6 +233,11 @@ class DataHandlerApp:
 
         except Exception as e:
             messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
+        finally:
+            # Close SSH Tunnel if it exists
+            if hasattr(self, 'tunnel') and self.tunnel:
+                self.tunnel.stop()
+                print("🔒 SSH Tunnel Closed.")
 
 
 class TextRedirector:

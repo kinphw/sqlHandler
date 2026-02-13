@@ -34,7 +34,8 @@ def export_to_pkl(db_url, export_scope, table_name=None, query=None, output_path
 
             # 특정 테이블만 추출
             print(f"▶ [mysql2pkl] 테이블 '{table_name}' 데이터 조회 중...")
-            df = pd.read_sql(text(f"SELECT * FROM `{table_name}`"), con=engine)
+            safe_table_name = table_name.replace("`", "``")
+            df = pd.read_sql(text(f"SELECT * FROM `{safe_table_name}`"), con=engine)
             print(f"✅ [mysql2pkl] 데이터 조회 완료: {df.shape[0]} rows, {df.shape[1]} columns")
             
             if df.empty:
