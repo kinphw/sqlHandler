@@ -20,13 +20,25 @@ class MySQLHandlerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("MySQL Data Handler")
-        self.root.geometry("700x750")
+        self.root.geometry("1000x750")
         
         # Center Window
         self.center_window()
 
-        # --- DB Connection Section ---
-        lb_db_frame = tk.LabelFrame(root, text="DB Connection Settings", padx=10, pady=10)
+        # --- Main Layout (Left: Settings/Log, Right: Query) ---
+        self.paned_window = tk.PanedWindow(root, orient=tk.HORIZONTAL)
+        self.paned_window.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Left Panel (Settings & Log)
+        self.left_panel = tk.Frame(self.paned_window)
+        self.paned_window.add(self.left_panel, width=500)
+        
+        # Right Panel (Query Input) - Initially hidden
+        self.right_panel = tk.Frame(self.paned_window)
+        self.is_query_panel_visible = False  # Track visibility state
+
+        # --- DB Connection Section (Left Panel) ---
+        lb_db_frame = tk.LabelFrame(self.left_panel, text="DB Connection Settings", padx=10, pady=10)
         lb_db_frame.pack(fill="x", padx=10, pady=5)
 
         tk.Label(lb_db_frame, text="DB Name:").grid(row=0, column=0, sticky="e")
@@ -42,8 +54,8 @@ class MySQLHandlerApp:
         self.lbl_db_info.grid(row=2, column=0, columnspan=2, sticky="w")
         self.update_db_info()
 
-        # --- Mode Selection Section ---
-        lb_mode_frame = tk.LabelFrame(root, text="Select Mode", padx=10, pady=10)
+        # --- Mode Selection Section (Left Panel) ---
+        lb_mode_frame = tk.LabelFrame(self.left_panel, text="Select Mode", padx=10, pady=10)
         lb_mode_frame.pack(fill="x", padx=10, pady=5)
 
         self.var_mode = tk.StringVar(value="mysql2xlsx")
@@ -58,8 +70,8 @@ class MySQLHandlerApp:
         for text, value in modes:
             tk.Radiobutton(lb_mode_frame, text=text, variable=self.var_mode, value=value, command=self.update_ui).pack(anchor="w")
 
-        # --- Dynamic Input Section ---
-        self.lb_input_frame = tk.LabelFrame(root, text="Settings", padx=10, pady=10)
+        # --- Dynamic Input Section (Left Panel) ---
+        self.lb_input_frame = tk.LabelFrame(self.left_panel, text="Settings", padx=10, pady=10)
         self.lb_input_frame.pack(fill="x", padx=10, pady=5)
 
         # Widget references (populated by update_ui)
@@ -68,8 +80,8 @@ class MySQLHandlerApp:
         # Initial UI Setup
         self.update_ui()
 
-        # --- Log Output Section ---
-        lb_log_frame = tk.LabelFrame(root, text="Log Output", padx=10, pady=10)
+        # --- Log Output Section (Left Panel) ---
+        lb_log_frame = tk.LabelFrame(self.left_panel, text="Log Output", padx=10, pady=10)
         lb_log_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
         self.log_text = scrolledtext.ScrolledText(lb_log_frame, height=15, state='disabled', wrap='word')
@@ -78,8 +90,17 @@ class MySQLHandlerApp:
         # Redirect stdout to log widget
         sys.stdout = TextRedirector(self.log_text)
         
-        # --- Action Button ---
-        tk.Button(root, text="RUN", command=self.run_process, height=2, bg="#dddddd").pack(fill="x", padx=10, pady=10)
+        # --- Action Button (Left Panel) ---
+        tk.Button(self.left_panel, text="RUN", command=self.run_process, height=2, bg="#dddddd").pack(fill="x", padx=10, pady=10)
+
+        # --- Query Input Section (Right Panel) ---
+        lb_query_frame = tk.LabelFrame(self.right_panel, text="SQL Query Input (For Query Mode)", padx=10, pady=10)
+        lb_query_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        self.txt_query = scrolledtext.ScrolledText(lb_query_frame, font=("Consolas", 10))
+        self.txt_query.pack(fill="both", expand=True)
+        
+        tk.Label(lb_query_frame, text="* Export 범위에서 '사용자 정의 쿼리' 선택 시 사용됩니다.", fg="gray").pack(anchor="w")
 
     def center_window(self):
         self.root.update_idletasks()
@@ -100,12 +121,28 @@ class MySQLHandlerApp:
         """Update UI based on selected mode using modular GUI widgets."""
         mode = self.var_mode.get()
         
+        # Hide query panel by default
+        self.toggle_query_panel(False)
+        
         if mode in ["mysql2xlsx", "mysql2pkl"]:
             # Export Mode: Use frommysql GUI widgets
-            self.widgets = create_export_widgets(self.lb_input_frame, mode)
+            # Pass callback to toggle query panel
+            self.widgets = create_export_widgets(self.lb_input_frame, mode, 
+                                               on_query_mode_change=self.toggle_query_panel)
         elif mode in ["xlsx2mysql", "pkl2mysql"]:
             # Import Mode: Use tomysql GUI widgets
             self.widgets = create_import_widgets(self.lb_input_frame, mode)
+
+    def toggle_query_panel(self, show):
+        """Show or hide the right-side query panel."""
+        if show:
+            if not self.is_query_panel_visible:
+                self.paned_window.add(self.right_panel)
+                self.is_query_panel_visible = True
+        else:
+            if self.is_query_panel_visible:
+                self.paned_window.forget(self.right_panel)
+                self.is_query_panel_visible = False
 
 
 
@@ -148,8 +185,17 @@ class MySQLHandlerApp:
                     messagebox.showwarning("Warning", "특정 테이블 선택 시 테이블명을 입력해주세요.")
                     return
                 
+                export_scope = params.get('scope', 'table')  # Default to table for backward compatibility
                 table_name = params['table_name']
-                
+                query = None
+
+                # Handle Query Mode
+                if export_scope == 'query':
+                    query = self.txt_query.get("1.0", tk.END).strip()
+                    if not query:
+                        messagebox.showwarning("Warning", "쿼리를 입력해주세요.")
+                        return
+
                 # Determine file extension and filter
                 if mode == "mysql2xlsx":
                     ext = ".xlsx"
@@ -159,7 +205,9 @@ class MySQLHandlerApp:
                     filetypes = [("Pickle files", "*.pkl")]
                 
                 # Default filename
-                if table_name:
+                if export_scope == 'query':
+                    default_name = f"query_result{ext}"
+                elif table_name:
                     default_name = f"{table_name}{ext}"
                 else:
                     db_name = self.entry_db_name.get()
@@ -175,11 +223,17 @@ class MySQLHandlerApp:
                 
                 # Execute export
                 if mode == "mysql2xlsx":
-                    export_to_xlsx(db_url, table_name, save_path)
+                    export_to_xlsx(db_url, export_scope, table_name, query, save_path)
                 else:
-                    export_to_pkl(db_url, table_name, save_path)
+                    export_to_pkl(db_url, export_scope, table_name, query, save_path)
                 
-                scope_text = f"테이블 '{table_name}'" if table_name else "전체 데이터베이스"
+                if export_scope == 'query':
+                    scope_text = "사용자 정의 쿼리 결과"
+                elif table_name:
+                    scope_text = f"테이블 '{table_name}'"
+                else:
+                    scope_text = "전체 데이터베이스"
+                    
                 messagebox.showinfo("Success", f"{scope_text}를 {save_path}로 추출했습니다.")
 
             elif mode in ["xlsx2mysql", "pkl2mysql"]:
