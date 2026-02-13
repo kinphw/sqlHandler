@@ -3,28 +3,57 @@ from sqlalchemy import create_engine
 
 def export_to_xlsx(db_url, table_name, output_path):
     """
-    Exports a MySQL table to an Excel file.
+    Exports MySQL table(s) to an Excel file.
     
     Args:
         db_url (str): SQLAlchemy database URL.
-        table_name (str): Name of the table to export.
+        table_name (str or None): Name of the table to export. If None, exports all tables.
         output_path (str): Path to save the Excel file.
     """
     try:
         engine = create_engine(db_url)
         print(f"✅ [mysql2xlsx] 데이터베이스 연결 성공!")
         
-        print(f"▶ [mysql2xlsx] 테이블 '{table_name}' 데이터 조회 중...")
-        query = f"SELECT * FROM `{table_name}`"
-        df = pd.read_sql(query, con=engine)
-        print(f"✅ [mysql2xlsx] 데이터 조회 완료: {df.shape[0]} rows, {df.shape[1]} columns")
-        
-        if df.empty:
-            print("⚠️ [mysql2xlsx] 조회된 데이터가 없습니다.")
-            return False
+        if table_name:
+            # 특정 테이블만 추출
+            print(f"▶ [mysql2xlsx] 테이블 '{table_name}' 데이터 조회 중...")
+            query = f"SELECT * FROM `{table_name}`"
+            df = pd.read_sql(query, con=engine)
+            print(f"✅ [mysql2xlsx] 데이터 조회 완료: {df.shape[0]} rows, {df.shape[1]} columns")
+            
+            if df.empty:
+                print("⚠️ [mysql2xlsx] 조회된 데이터가 없습니다.")
+                return False
 
-        df.to_excel(output_path, index=False)
-        print(f"🎉 [mysql2xlsx] 엑셀 파일 저장 완료: {output_path}")
+            df.to_excel(output_path, index=False)
+            print(f"🎉 [mysql2xlsx] 엑셀 파일 저장 완료: {output_path}")
+        else:
+            # 전체 데이터베이스 추출
+            print(f"▶ [mysql2xlsx] 데이터베이스의 모든 테이블 조회 중...")
+            tables_query = "SHOW TABLES"
+            tables_df = pd.read_sql(tables_query, con=engine)
+            table_list = tables_df.iloc[:, 0].tolist()
+            
+            if not table_list:
+                print("⚠️ [mysql2xlsx] 데이터베이스에 테이블이 없습니다.")
+                return False
+            
+            print(f"✅ [mysql2xlsx] {len(table_list)}개의 테이블 발견: {', '.join(table_list)}")
+            
+            # ExcelWriter로 여러 시트 작성
+            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+                for table in table_list:
+                    print(f"▶ [mysql2xlsx] 테이블 '{table}' 추출 중...")
+                    query = f"SELECT * FROM `{table}`"
+                    df = pd.read_sql(query, con=engine)
+                    
+                    # 시트 이름은 31자로 제한 (Excel 제약)
+                    sheet_name = table[:31]
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    print(f"   ✅ {df.shape[0]} rows, {df.shape[1]} columns")
+            
+            print(f"🎉 [mysql2xlsx] 전체 데이터베이스 엑셀 파일 저장 완료: {output_path}")
+        
         return True
 
     except Exception as e:

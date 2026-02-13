@@ -1,14 +1,17 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, scrolledtext
 import os
+import sys
 from dotenv import load_dotenv
 import pymysql
 
 # Load Modules
 from frommysql.mysql2xlsx import export_to_xlsx
 from frommysql.mysql2pkl import export_to_pkl
+from frommysql.gui_widgets import create_export_widgets, get_export_params
 from tomysql.xlsx2mysql import import_from_xlsx
 from tomysql.pkl2mysql import import_from_pkl
+from tomysql.gui_widgets import create_import_widgets, get_import_params
 
 # Load .env
 load_dotenv('.env')
@@ -17,7 +20,7 @@ class MySQLHandlerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("MySQL Data Handler")
-        self.root.geometry("500x450")
+        self.root.geometry("700x750")
         
         # Center Window
         self.center_window()
@@ -59,14 +62,22 @@ class MySQLHandlerApp:
         self.lb_input_frame = tk.LabelFrame(root, text="Settings", padx=10, pady=10)
         self.lb_input_frame.pack(fill="x", padx=10, pady=5)
 
-        # Dynamic Widgets
-        self.lbl_target = tk.Label(self.lb_input_frame, text="")
-        self.entry_target = tk.Entry(self.lb_input_frame, width=30)
-        self.btn_browse = tk.Button(self.lb_input_frame, text="Browse", command=self.browse_file)
+        # Widget references (populated by update_ui)
+        self.widgets = {}
         
         # Initial UI Setup
         self.update_ui()
 
+        # --- Log Output Section ---
+        lb_log_frame = tk.LabelFrame(root, text="Log Output", padx=10, pady=10)
+        lb_log_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        self.log_text = scrolledtext.ScrolledText(lb_log_frame, height=15, state='disabled', wrap='word')
+        self.log_text.pack(fill="both", expand=True)
+        
+        # Redirect stdout to log widget
+        sys.stdout = TextRedirector(self.log_text)
+        
         # --- Action Button ---
         tk.Button(root, text="RUN", command=self.run_process, height=2, bg="#dddddd").pack(fill="x", padx=10, pady=10)
 
@@ -86,45 +97,18 @@ class MySQLHandlerApp:
         self.lbl_db_info.config(text=f"Connecting to: {user}@{host}:{port}")
 
     def update_ui(self):
-        # Clear frame
-        for widget in self.lb_input_frame.winfo_children():
-            widget.grid_forget()
-
+        """Update UI based on selected mode using modular GUI widgets."""
         mode = self.var_mode.get()
         
         if mode in ["mysql2xlsx", "mysql2pkl"]:
-            # Export Mode: Need Table Name
-            self.lbl_target.config(text="Table Name:")
-            self.lbl_target.grid(row=0, column=0, sticky="e", padx=5)
-            self.entry_target.grid(row=0, column=1, sticky="w", padx=5)
-            self.entry_target.delete(0, tk.END) # Clear
-            # Browse button not needed for table name
-            
+            # Export Mode: Use frommysql GUI widgets
+            self.widgets = create_export_widgets(self.lb_input_frame, mode)
         elif mode in ["xlsx2mysql", "pkl2mysql"]:
-            # Import Mode: Need File Path & Optional Table Name (for xlsx mostly, or forced override)
-            self.lbl_target.config(text="File Path:")
-            self.lbl_target.grid(row=0, column=0, sticky="e", padx=5)
-            self.entry_target.grid(row=0, column=1, sticky="w", padx=5)
-            self.btn_browse.grid(row=0, column=2, padx=5)
-            
-            # Optional Table Name for Import
-            tk.Label(self.lb_input_frame, text="Target Table (Opt):").grid(row=1, column=0, sticky="e", padx=5, pady=5)
-            self.entry_target_table = tk.Entry(self.lb_input_frame, width=20)
-            self.entry_target_table.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+            # Import Mode: Use tomysql GUI widgets
+            self.widgets = create_import_widgets(self.lb_input_frame, mode)
 
 
-    def browse_file(self):
-        mode = self.var_mode.get()
-        filetypes = []
-        if mode == "xlsx2mysql":
-            filetypes = [("Excel files", "*.xlsx *.xls")]
-        elif mode == "pkl2mysql":
-            filetypes = [("Pickle files", "*.pkl")]
-            
-        filepath = filedialog.askopenfilename(filetypes=filetypes)
-        if filepath:
-            self.entry_target.delete(0, tk.END)
-            self.entry_target.insert(0, filepath)
+
 
     def get_db_url_and_config(self):
         db_name = self.entry_db_name.get()
@@ -157,64 +141,94 @@ class MySQLHandlerApp:
         mode = self.var_mode.get()
         
         try:
-            if mode == "mysql2xlsx":
-                table_name = self.entry_target.get()
-                if not table_name:
-                    messagebox.showwarning("Warning", "Please enter a table name.")
+            if mode in ["mysql2xlsx", "mysql2pkl"]:
+                # Export operations
+                params = get_export_params(self.widgets)
+                if params is None:
+                    messagebox.showwarning("Warning", "특정 테이블 선택 시 테이블명을 입력해주세요.")
                     return
+                
+                table_name = params['table_name']
+                
+                # Determine file extension and filter
+                if mode == "mysql2xlsx":
+                    ext = ".xlsx"
+                    filetypes = [("Excel files", "*.xlsx")]
+                else:
+                    ext = ".pkl"
+                    filetypes = [("Pickle files", "*.pkl")]
+                
+                # Default filename
+                if table_name:
+                    default_name = f"{table_name}{ext}"
+                else:
+                    db_name = self.entry_db_name.get()
+                    default_name = f"{db_name}_full{ext}"
                 
                 # Ask for save path
-                save_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")], initialfile=f"{table_name}.xlsx")
+                save_path = filedialog.asksaveasfilename(
+                    defaultextension=ext, 
+                    filetypes=filetypes, 
+                    initialfile=default_name
+                )
                 if not save_path: return
                 
-                export_to_xlsx(db_url, table_name, save_path)
-                messagebox.showinfo("Success", f"Exported {table_name} to {save_path}")
+                # Execute export
+                if mode == "mysql2xlsx":
+                    export_to_xlsx(db_url, table_name, save_path)
+                else:
+                    export_to_pkl(db_url, table_name, save_path)
+                
+                scope_text = f"테이블 '{table_name}'" if table_name else "전체 데이터베이스"
+                messagebox.showinfo("Success", f"{scope_text}를 {save_path}로 추출했습니다.")
 
-            elif mode == "mysql2pkl":
-                table_name = self.entry_target.get()
-                if not table_name:
-                    messagebox.showwarning("Warning", "Please enter a table name.")
-                    return
-
-                # Ask for save path
-                save_path = filedialog.asksaveasfilename(defaultextension=".pkl", filetypes=[("Pickle files", "*.pkl")], initialfile=f"{table_name}.pkl")
-                if not save_path: return
-
-                export_to_pkl(db_url, table_name, save_path)
-                messagebox.showinfo("Success", f"Exported {table_name} to {save_path}")
-
-            elif mode == "xlsx2mysql":
-                file_path = self.entry_target.get()
-                if not file_path:
-                    messagebox.showwarning("Warning", "Please select an Excel file.")
+            elif mode in ["xlsx2mysql", "pkl2mysql"]:
+                # Import operations
+                params = get_import_params(self.widgets)
+                if params is None:
+                    messagebox.showwarning("Warning", "파일을 선택해주세요.")
                     return
                 
-                target_table = self.entry_target_table.get()
-                target_table = target_table if target_table else None
+                file_path = params['file_path']
+                import_scope = params['import_scope']
+                source_name = params['source_name']
+                target_table = params['target_table']
+                if_exists = params['if_exists']
                 
-                import_from_xlsx(db_url, file_path, target_table)
-                messagebox.showinfo("Success", "Import completed.")
-
-            elif mode == "pkl2mysql":
-                file_path = self.entry_target.get()
-                if not file_path:
-                    messagebox.showwarning("Warning", "Please select a Pickle file.")
+                # Validation for single mode
+                if import_scope == "single" and not target_table:
+                    messagebox.showwarning("Warning", "특정 테이블 모드에서는 대상 테이블명을 입력해주세요.")
                     return
                 
-                target_table = self.entry_target_table.get()
-                if not target_table:
-                    # Unlike xlsx, pkl doesn't have sheet names so we must know the table name
-                    # But the original script had a hardcoded one or let the user decide.
-                    # Let's enforce it or use filename.
-                    target_table = os.path.basename(file_path).split('.')[0]
-                    proceed = messagebox.askyesno("Table Name", f"Target table name not specified. Use '{target_table}'?")
-                    if not proceed: return
-
-                import_from_pkl(db_config, file_path, target_table)
-                messagebox.showinfo("Success", "Import completed.")
+                # Execute import
+                if mode == "xlsx2mysql":
+                    import_from_xlsx(db_url, file_path, import_scope, source_name, target_table, if_exists)
+                else:
+                    import_from_pkl(db_config, file_path, import_scope, source_name, target_table, if_exists)
+                
+                scope_text = f"테이블 '{target_table}'" if import_scope == "single" else "전체 데이터"
+                mode_text = "대체" if if_exists == "replace" else "추가"
+                messagebox.showinfo("Success", f"{scope_text} Import가 완료되었습니다 ({mode_text} 모드).")
 
         except Exception as e:
-            messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
+            messagebox.showerror("Error", f"오류가 발생했습니다:\n{str(e)}")
+
+
+class TextRedirector:
+    """Redirects stdout to a tkinter Text widget."""
+    def __init__(self, widget):
+        self.widget = widget
+
+    def write(self, text):
+        self.widget.configure(state='normal')
+        self.widget.insert(tk.END, text)
+        self.widget.see(tk.END)
+        self.widget.configure(state='disabled')
+        self.widget.update_idletasks()
+
+    def flush(self):
+        pass
+
 
 if __name__ == "__main__":
     root = tk.Tk()
