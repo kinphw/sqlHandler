@@ -24,7 +24,17 @@ def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_pat
                 raise ValueError("쿼리 스코프를 선택했을 경우, 'output_path' 인자는 필수입니다.")
 
             print(f"▶ [mysql2xlsx] 사용자 정의 쿼리 실행 중...")
-            df = pd.read_sql(query, con=engine)
+            
+            # % 문자 처리: pd.read_sql은 params 인자가 없으면 %를 포맷팅 문자로 처리하지 않지만,
+            # 만약 내부적으로 처리 과정에서 문제가 된다면 sqlalchemy text()를 사용하는 것이 안전함.
+            # 하지만 여기서는 단순 실행이므로, 사용자가 입력한 쿼리 그대로 실행되도록 함.
+            # 에러 메시지 "unsupported format character"는 f-string이나 % 포맷팅에서 발생함.
+            # 코드 상에서 f-string 내부에 query 변수를 직접 넣지는 않았으므로, 
+            # pd.read_sql 내부나 다른 라이브러리(pymysql/sqlalchemy) 연동 과정에서의 이슈일 가능성 높음.
+            # 가장 확실한 해결책은 sqlalchemy의 text() 객체로 감싸는 것.
+            
+            from sqlalchemy import text
+            df = pd.read_sql(text(query), con=engine)
             print(f"✅ [mysql2xlsx] 쿼리 실행 완료: {df.shape[0]} rows, {df.shape[1]} columns")
             
             if df.empty:

@@ -1,24 +1,40 @@
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
-def export_to_pkl(db_url, table_name, output_path):
+def export_to_pkl(db_url, export_scope, table_name=None, query=None, output_path=None):
     """
     Exports MySQL table(s) to a Pickle file.
     
     Args:
         db_url (str): SQLAlchemy database URL.
-        table_name (str or None): Name of the table to export. If None, exports all tables as dictionary.
+        export_scope (str): 'table', 'database', or 'query'.
+        table_name (str or None): Name of the table to export.
+        query (str or None): Custom SQL query (for 'query' scope).
         output_path (str): Path to save the Pickle file.
     """
     try:
         engine = create_engine(db_url)
         print(f"✅ [mysql2pkl] 데이터베이스 연결 성공!")
         
-        if table_name:
+        if export_scope == "query":
+            # 사용자 정의 쿼리 실행
+            if not query:
+                raise ValueError("쿼리 스코프를 선택했을 경우, 'query' 인자는 필수입니다.")
+            
+            print(f"▶ [mysql2pkl] 사용자 정의 쿼리 실행 중...")
+            df = pd.read_sql(text(query), con=engine)
+            print(f"✅ [mysql2pkl] 쿼리 실행 완료: {df.shape[0]} rows, {df.shape[1]} columns")
+            
+            df.to_pickle(output_path)
+            print(f"🎉 [mysql2pkl] Pickle 파일 저장 완료: {output_path}")
+
+        elif export_scope == "table":
+            if not table_name:
+                raise ValueError("테이블 스코프를 선택했을 경우, 'table_name' 인자는 필수입니다.")
+
             # 특정 테이블만 추출
             print(f"▶ [mysql2pkl] 테이블 '{table_name}' 데이터 조회 중...")
-            query = f"SELECT * FROM `{table_name}`"
-            df = pd.read_sql(query, con=engine)
+            df = pd.read_sql(text(f"SELECT * FROM `{table_name}`"), con=engine)
             print(f"✅ [mysql2pkl] 데이터 조회 완료: {df.shape[0]} rows, {df.shape[1]} columns")
             
             if df.empty:
@@ -27,10 +43,11 @@ def export_to_pkl(db_url, table_name, output_path):
 
             df.to_pickle(output_path)
             print(f"🎉 [mysql2pkl] Pickle 파일 저장 완료: {output_path}")
-        else:
+
+        elif export_scope == "database":
             # 전체 데이터베이스 추출 (딕셔너리 형태)
             print(f"▶ [mysql2pkl] 데이터베이스의 모든 테이블 조회 중...")
-            tables_query = "SHOW TABLES"
+            tables_query = text("SHOW TABLES")
             tables_df = pd.read_sql(tables_query, con=engine)
             table_list = tables_df.iloc[:, 0].tolist()
             
@@ -44,8 +61,7 @@ def export_to_pkl(db_url, table_name, output_path):
             all_tables = {}
             for table in table_list:
                 print(f"▶ [mysql2pkl] 테이블 '{table}' 추출 중...")
-                query = f"SELECT * FROM `{table}`"
-                df = pd.read_sql(query, con=engine)
+                df = pd.read_sql(text(f"SELECT * FROM `{table}`"), con=engine)
                 all_tables[table] = df
                 print(f"   ✅ {df.shape[0]} rows, {df.shape[1]} columns")
             
