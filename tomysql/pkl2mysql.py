@@ -97,10 +97,6 @@ def _insert_ignore(table_name, df, conn):
     total_rows = len(df)
     inserted_rows = 0
 
-    # id 컬럼 삭제 (DB의 AUTO_INCREMENT에 맡긴다)
-    if 'id' in df.columns:
-        df = df.drop(columns=['id'])
-
     for _, row in df.iterrows():
         cursor.execute(insert_sql, tuple(row))
         inserted_rows += cursor.rowcount
