@@ -1,5 +1,5 @@
 import pandas as pd
-import pymysql
+from sqlalchemy import create_engine, inspect
 import os
 
 def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, target_table=None, if_exists="replace"):
@@ -14,17 +14,12 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
         target_table (str, optional): Target table name (for single mode).
         if_exists (str): 'replace' to drop existing table, 'append' to add to existing table.
     """
-    conn = None
     try:
-        conn = pymysql.connect(
-            host=db_config['host'],
-            port=int(db_config['port']),
-            user=db_config['user'],
-            password=db_config['password'],
-            database=db_config['database'],
-            charset='utf8mb4'
+        db_url = (
+            f"mysql+pymysql://{db_config['user']}:{db_config['password']}"
+            f"@{db_config['host']}:{int(db_config['port'])}/{db_config['database']}?charset=utf8mb4"
         )
-        
+        engine = create_engine(db_url)
         print(f"✅ [pkl2mysql] 데이터베이스 연결 성공!")
         
         # Load pickle file
@@ -74,11 +69,8 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
             # Clean column names
             df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
             
-            # Import based on if_exists mode
-            if if_exists == "replace":
-                _import_replace(tbl_name, df, conn)
-            else:  # append
-                _import_append(tbl_name, df, conn)
+            # Import based on if_exists mode using pandas.to_sql
+            _import_single_table(df, tbl_name, engine, if_exists)
             
             imported_count += 1
         
@@ -90,119 +82,35 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
         print(f"❌ [pkl2mysql] 오류 발생: {e}")
         raise e
     finally:
-        if conn:
-            conn.close()
+        pass
 
 
-def _import_replace(table_name, df, conn):
-    """Replace mode: Drop existing table and create new one."""
-    cursor = conn.cursor()
-    
-    # Check if table exists
-    cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
-    table_existed = cursor.fetchone() is not None
-    
-    if table_existed:
-        # Drop existing table
-        cursor.execute(f"DROP TABLE `{table_name}`")
-        print(f"  🗑️ 기존 테이블 '{table_name}' 삭제 완료")
-    else:
-        print(f"  ℹ️ 테이블 '{table_name}'이 존재하지 않음 (신규 생성)")
-    
-    # Create table
-    _create_table(table_name, df, cursor)
-    conn.commit()
-    print(f"  🛠️ 테이블 '{table_name}' 생성 완료")
-    
-    # Insert data
-    _insert_data(table_name, df, conn)
+def _import_single_table(df, table_name, engine, if_exists):
+    """Import a single DataFrame to MySQL table using pandas.to_sql."""
+    # Clean column names
+    df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
 
+    # _x000D_ 처리 (Excel 특수 문자와 동일하게 정리)
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].astype(str).str.replace('_x000D_', '', regex=False)
 
-def _import_append(table_name, df, conn):
-    """Append mode: Insert into existing table (create if not exists)."""
-    cursor = conn.cursor()
-    
-    # Check if table exists
-    cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
-    result = cursor.fetchone()
-    
-    if not result:
-        print(f"  ℹ️ 테이블 '{table_name}'이 존재하지 않아 생성합니다.")
-        _create_table(table_name, df, cursor)
-        conn.commit()
-        print(f"  🛠️ 테이블 '{table_name}' 생성 완료")
-    else:
-        print(f"  ✅ 테이블 '{table_name}'이 이미 존재합니다. 데이터를 추가합니다.")
-    
-    # Insert data (with IGNORE to skip duplicates)
-    _insert_ignore(table_name, df, conn)
+    mode_text = "대체" if if_exists == "replace" else "추가"
 
+    # Check if table exists (for better messaging)
+    inspector = inspect(engine)
+    table_existed = table_name in inspector.get_table_names()
 
-def _create_table(table_name, df, cursor):
-    """Create table based on DataFrame schema."""
-    def map_dtype(dtype):
-        if pd.api.types.is_integer_dtype(dtype):
-            return "INT"
-        elif pd.api.types.is_float_dtype(dtype):
-            return "FLOAT"
-        elif pd.api.types.is_bool_dtype(dtype):
-            return "BOOLEAN"
-        elif pd.api.types.is_datetime64_any_dtype(dtype):
-            return "DATETIME"
+    if if_exists == "replace":
+        if table_existed:
+            print(f"  🗑️ 기존 테이블 '{table_name}' 삭제 후 재생성")
         else:
-            return "TEXT"
-    
-    columns_sql = []
-    for col in df.columns:
-        sql_type = map_dtype(df[col].dtype)
-        columns_sql.append(f"`{col}` {sql_type}")
-    
-    create_table_sql = f"""
-    CREATE TABLE `{table_name}` (
-        {', '.join(columns_sql)}
-    ) CHARACTER SET utf8mb4;
-    """
-    
-    cursor.execute(create_table_sql)
+            print(f"  ℹ️ 테이블 '{table_name}' 신규 생성")
+    else:
+        if table_existed:
+            print(f"  ✅ 기존 테이블 '{table_name}'에 데이터 추가")
+        else:
+            print(f"  ℹ️ 테이블 '{table_name}' 신규 생성 후 데이터 삽입")
 
-
-def _insert_data(table_name, df, conn):
-    """Insert data without IGNORE (for replace mode)."""
-    cursor = conn.cursor()
-    
-    columns = ', '.join([f"`{col}`" for col in df.columns])
-    placeholders = ', '.join(['%s'] * len(df.columns))
-    
-    insert_sql = f"""
-    INSERT INTO `{table_name}` ({columns})
-    VALUES ({placeholders})
-    """
-    
-    for _, row in df.iterrows():
-        cursor.execute(insert_sql, tuple(row))
-    
-    conn.commit()
-    print(f"  ✅ {len(df)} rows 삽입 완료")
-
-
-def _insert_ignore(table_name, df, conn):
-    """Insert data with IGNORE (for append mode)."""
-    cursor = conn.cursor()
-    
-    columns = ', '.join([f"`{col}`" for col in df.columns])
-    placeholders = ', '.join(['%s'] * len(df.columns))
-    
-    insert_sql = f"""
-    INSERT IGNORE INTO `{table_name}` ({columns})
-    VALUES ({placeholders})
-    """
-    
-    total_rows = len(df)
-    inserted_rows = 0
-    
-    for _, row in df.iterrows():
-        cursor.execute(insert_sql, tuple(row))
-        inserted_rows += cursor.rowcount
-    
-    conn.commit()
-    print(f"  ✅ 전체 {total_rows} rows, 중복 제외 후 삽입된 건: {inserted_rows} rows")
+    print(f"  ▶ Import 중 ({mode_text} 모드)...")
+    df.to_sql(name=table_name, con=engine, index=False, if_exists=if_exists)
+    print(f"  ✅ {len(df)} rows Import 완료")
