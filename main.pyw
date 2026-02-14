@@ -82,6 +82,9 @@ class DataHandlerApp:
         elif mode in ["xlsx2mysql", "pkl2mysql"]:
             # Import Mode
             self.widgets = create_import_widgets(self.lb_input_frame, mode)
+            self.populate_collation_dropdown()
+            self.attach_collation_ui_handlers()
+            self.schedule_collation_status_update()
 
     def toggle_query_panel(self, show):
         """Show or hide the right-side query panel in MySQL tab."""
@@ -94,10 +97,11 @@ class DataHandlerApp:
                 self.mysql_paned_window.forget(self.mysql_right_panel)
                 self.is_query_panel_visible = False
 
-    def get_db_url_and_config(self):
+    def get_db_url_and_config(self, silent=False):
         db_name = self.entry_db_name.get()
         if not db_name:
-            messagebox.showerror("Error", "Database name is required.")
+            if not silent:
+                messagebox.showerror("Error", "Database name is required.")
             return None, None
             
         prefix = "PROD_" if self.var_prod.get() else ""
@@ -112,8 +116,9 @@ class DataHandlerApp:
         
         # Validation
         if not all(config.values()):
-             messagebox.showerror("Configuration Error", "Missing .env configuration for selected environment.")
-             return None, None
+            if not silent:
+                messagebox.showerror("Configuration Error", "Missing .env configuration for selected environment.")
+            return None, None
 
         # SSH Tunnel Support
         self.tunnel = None
@@ -159,11 +164,224 @@ class DataHandlerApp:
             except ImportError:
                 print("⚠️ sshtunnel module not found. Skipping SSH tunnel.")
             except Exception as e:
-                messagebox.showerror("SSH Error", f"Failed to create SSH tunnel: {e}")
+                if not silent:
+                    messagebox.showerror("SSH Error", f"Failed to create SSH tunnel: {e}")
                 return None, None
 
         db_url = f"mysql+pymysql://{config['user']}:{config['password']}@{config['host']}:{config['port']}/{config['database']}?charset=utf8mb4"
         return db_url, config
+
+    def populate_collation_dropdown(self):
+        """Fetch collations from server and update import dropdown."""
+        if not hasattr(self, 'widgets'):
+            return
+        if 'cmb_collation' not in self.widgets:
+            return
+
+        collations, db_default = self.fetch_server_collations()
+        self._db_default_collation = db_default
+        if collations:
+            preferred = "utf8mb4_uca1400_ai_ci"
+            preferred_missing = preferred not in collations
+            if not preferred_missing:
+                collations = [preferred] + [c for c in collations if c != preferred]
+            values = ["server_default"] + collations
+            if preferred_missing:
+                values.insert(1, preferred)
+            self.widgets['cmb_collation']['values'] = values
+
+            current = self.widgets['var_collation'].get()
+            if current not in values:
+                self.widgets['var_collation'].set("server_default")
+
+            if db_default:
+                hint = f"(DB 기본: {db_default})"
+            else:
+                hint = "(DB 기본: 알 수 없음)"
+            if preferred_missing:
+                hint += " / uca1400 미표기"
+            self.widgets['lbl_collation_hint'].config(text=hint, fg="gray")
+        else:
+            self.widgets['lbl_collation_hint'].config(text="(서버 조회 실패: DB 기본값 알 수 없음)", fg="gray")
+
+    def attach_collation_ui_handlers(self):
+        if not hasattr(self, 'widgets'):
+            return
+        if 'var_target_table' not in self.widgets:
+            return
+
+        def _on_change(*_):
+            self.schedule_collation_status_update()
+
+        self.widgets['var_target_table'].trace_add('write', _on_change)
+        self.widgets['var_collation'].trace_add('write', _on_change)
+        self.widgets['var_import_scope'].trace_add('write', _on_change)
+
+    def schedule_collation_status_update(self):
+        if not hasattr(self, 'root'):
+            return
+        if hasattr(self, '_collation_update_job') and self._collation_update_job:
+            self.root.after_cancel(self._collation_update_job)
+        self._collation_update_job = self.root.after(300, self.update_collation_status)
+
+    def update_collation_status(self):
+        if not hasattr(self, 'widgets'):
+            return
+        widgets = self.widgets
+        if 'lbl_table_collation_value' not in widgets:
+            return
+
+        import_scope = widgets['var_import_scope'].get()
+        if import_scope != "single":
+            widgets['lbl_table_collation_value'].config(text="전체 모드: 테이블별 표시 없음", fg="gray")
+            widgets['lbl_collation_compare_value'].config(text="-", fg="gray")
+            return
+
+        target_table = widgets['var_target_table'].get().strip()
+        if not target_table:
+            widgets['lbl_table_collation_value'].config(text="대상 테이블명 입력 필요", fg="gray")
+            widgets['lbl_collation_compare_value'].config(text="-", fg="gray")
+            return
+
+        db_url, db_config = self.get_db_url_and_config(silent=True)
+        if not db_url or not db_config:
+            widgets['lbl_table_collation_value'].config(text="DB 설정 필요", fg="gray")
+            widgets['lbl_collation_compare_value'].config(text="-", fg="gray")
+            return
+
+        selected = widgets['var_collation'].get()
+        if selected == "server_default":
+            if self._db_default_collation:
+                selected_text = f"server_default ({self._db_default_collation})"
+                selected_effective = self._db_default_collation
+            else:
+                selected_text = "server_default (알 수 없음)"
+                selected_effective = None
+        else:
+            selected_text = selected
+            selected_effective = selected
+
+        table_collation, column_mismatch_count = self.fetch_table_collation_info(db_config, target_table, selected_effective)
+
+        if table_collation:
+            widgets['lbl_table_collation_value'].config(text=f"{table_collation}", fg="black")
+            if selected_effective:
+                if table_collation == selected_effective:
+                    compare_text = f"일치 (선택: {selected_text})"
+                    compare_color = "green"
+                else:
+                    compare_text = f"불일치 (선택: {selected_text})"
+                    compare_color = "red"
+            else:
+                compare_text = f"비교 불가 (선택: {selected_text})"
+                compare_color = "gray"
+
+            if column_mismatch_count:
+                compare_text += f" / 컬럼 불일치: {column_mismatch_count}"
+            widgets['lbl_collation_compare_value'].config(text=compare_text, fg=compare_color)
+        else:
+            widgets['lbl_table_collation_value'].config(text="테이블 없음: 신규 생성 예정", fg="gray")
+            widgets['lbl_collation_compare_value'].config(text=f"적용 예정: {selected_text}", fg="gray")
+
+    def fetch_table_collation_info(self, db_config, table_name, compare_collation):
+        """Return (table_collation, mismatched_column_count)."""
+        conn = None
+        try:
+            conn = pymysql.connect(
+                host=db_config['host'],
+                user=db_config['user'],
+                password=db_config['password'],
+                port=int(db_config['port']),
+                database=db_config['database'],
+                charset='utf8mb4',
+                autocommit=True
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT TABLE_COLLATION
+                    FROM information_schema.tables
+                    WHERE table_schema = %s AND table_name = %s
+                    """,
+                    (db_config['database'], table_name)
+                )
+                row = cur.fetchone()
+                table_collation = row[0] if row else None
+
+                mismatch_count = 0
+                if compare_collation:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM information_schema.columns
+                        WHERE table_schema = %s AND table_name = %s
+                          AND collation_name IS NOT NULL
+                          AND collation_name <> %s
+                        """,
+                        (db_config['database'], table_name, compare_collation)
+                    )
+                    mismatch_row = cur.fetchone()
+                    mismatch_count = mismatch_row[0] if mismatch_row and mismatch_row[0] else 0
+
+            return table_collation, mismatch_count
+        except Exception as e:
+            print(f"⚠️ 테이블 콜레이션 조회 실패: {e}")
+            return None, 0
+        finally:
+            if conn:
+                conn.close()
+            if hasattr(self, 'tunnel') and self.tunnel:
+                self.tunnel.stop()
+                self.tunnel = None
+                print("🔒 SSH Tunnel Closed.")
+
+    def fetch_server_collations(self):
+        """Return (collations, db_default_collation) or (None, None) on failure."""
+        db_url, db_config = self.get_db_url_and_config(silent=True)
+        if not db_url or not db_config:
+            return None, None
+
+        conn = None
+        try:
+            conn = pymysql.connect(
+                host=db_config['host'],
+                user=db_config['user'],
+                password=db_config['password'],
+                port=int(db_config['port']),
+                database=db_config['database'],
+                charset='utf8mb4',
+                autocommit=True
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DEFAULT_COLLATION_NAME FROM information_schema.schemata WHERE schema_name=%s",
+                    (db_config['database'],)
+                )
+                row = cur.fetchone()
+                db_default = row[0] if row else None
+
+                cur.execute(
+                    """
+                    SELECT COLLATION_NAME
+                    FROM information_schema.COLLATIONS
+                    WHERE CHARACTER_SET_NAME = 'utf8mb4'
+                    ORDER BY COLLATION_NAME
+                    """
+                )
+                rows = cur.fetchall()
+                collations = [r[0] for r in rows if r and r[0]]
+
+            return collations, db_default
+        except Exception as e:
+            print(f"⚠️ Collation 목록 조회 실패: {e}")
+            return None, None
+        finally:
+            if conn:
+                conn.close()
+            if hasattr(self, 'tunnel') and self.tunnel:
+                self.tunnel.stop()
+                self.tunnel = None
+                print("🔒 SSH Tunnel Closed.")
 
     def run_process(self):
         """Execute MySQL Process"""
@@ -225,9 +443,9 @@ class DataHandlerApp:
                     return
                 
                 if mode == "xlsx2mysql":
-                    mysql_import_xlsx(db_url, params['file_path'], params['import_scope'], params['source_name'], params['target_table'], params['if_exists'])
+                    mysql_import_xlsx(db_url, params['file_path'], params['import_scope'], params['source_name'], params['target_table'], params['if_exists'], params.get('collation'), params.get('stop_on_mismatch', True))
                 else:
-                    mysql_import_pkl(db_config, params['file_path'], params['import_scope'], params['source_name'], params['target_table'], params['if_exists'])
+                    mysql_import_pkl(db_config, params['file_path'], params['import_scope'], params['source_name'], params['target_table'], params['if_exists'], params.get('collation'), params.get('stop_on_mismatch', True))
                 
                 messagebox.showinfo("Success", "Import successful.")
 

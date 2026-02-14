@@ -1,8 +1,8 @@
 import pandas as pd
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text, event
 import os
 
-def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, target_table=None, if_exists="replace"):
+def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, target_table=None, if_exists="replace", collation="server_default", stop_on_mismatch=True):
     """
     Imports a Pickle file to MySQL. Supports both single table and full import.
     
@@ -13,6 +13,8 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
         source_name (str, optional): Dictionary key to extract (for single mode with dict pickle).
         target_table (str, optional): Target table name (for single mode).
         if_exists (str): 'replace' to drop existing table, 'append' to add to existing table.
+        collation (str): Target collation, or 'server_default'.
+        stop_on_mismatch (bool): Stop import when collation mismatch is detected.
     """
     try:
         db_url = (
@@ -20,6 +22,14 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
             f"@{db_config['host']}:{int(db_config['port'])}/{db_config['database']}?charset=utf8mb4"
         )
         engine = create_engine(db_url)
+        desired_collation = _normalize_collation(collation)
+        _configure_engine_collation(engine, desired_collation)
+        schema_collation = _get_schema_collation(engine, db_config['database'])
+        selected_text = desired_collation or "server_default"
+        if schema_collation:
+            print(f"ℹ️ [pkl2mysql] 선택 콜레이션: {selected_text} (DB 기본: {schema_collation})")
+        else:
+            print(f"ℹ️ [pkl2mysql] 선택 콜레이션: {selected_text}")
         print(f"✅ [pkl2mysql] 데이터베이스 연결 성공!")
         
         # Load pickle file
@@ -63,14 +73,27 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
         
         # Process each table
         imported_count = 0
+        inspector = inspect(engine)
+        existing_tables = set(inspector.get_table_names())
+
         for tbl_name, df in tables_to_import.items():
             print(f"\n▶ [pkl2mysql] 테이블 '{tbl_name}' 처리 중... ({df.shape[0]} rows, {df.shape[1]} columns)")
             
             # Clean column names
             df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
             
+            table_existed = tbl_name in existing_tables
+            if table_existed:
+                _report_existing_table_collation(engine, db_config['database'], tbl_name)
+                if desired_collation:
+                    mismatch = _report_collation_mismatch(engine, db_config['database'], tbl_name, desired_collation, schema_collation)
+                    if mismatch and stop_on_mismatch:
+                        raise ValueError(f"콜레이션 불일치로 중단: 테이블 '{tbl_name}'")
+            elif import_scope == "single":
+                print(f"  ℹ️ 대상 테이블 '{tbl_name}' 미존재: 신규 생성 예정")
+
             # Import based on if_exists mode using pandas.to_sql
-            _import_single_table(df, tbl_name, engine, if_exists)
+            _import_single_table(df, tbl_name, engine, if_exists, desired_collation, table_existed)
             
             imported_count += 1
         
@@ -85,7 +108,7 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
         pass
 
 
-def _import_single_table(df, table_name, engine, if_exists):
+def _import_single_table(df, table_name, engine, if_exists, desired_collation, table_existed):
     """Import a single DataFrame to MySQL table using pandas.to_sql."""
     # Clean column names
     df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
@@ -95,10 +118,6 @@ def _import_single_table(df, table_name, engine, if_exists):
         df[col] = df[col].astype(str).str.replace('_x000D_', '', regex=False)
 
     mode_text = "대체" if if_exists == "replace" else "추가"
-
-    # Check if table exists (for better messaging)
-    inspector = inspect(engine)
-    table_existed = table_name in inspector.get_table_names()
 
     if if_exists == "replace":
         if table_existed:
@@ -113,4 +132,109 @@ def _import_single_table(df, table_name, engine, if_exists):
 
     print(f"  ▶ Import 중 ({mode_text} 모드)...")
     df.to_sql(name=table_name, con=engine, index=False, if_exists=if_exists)
+    _apply_table_collation(engine, table_name, desired_collation, table_existed, if_exists)
     print(f"  ✅ {len(df)} rows Import 완료")
+
+
+def _normalize_collation(collation):
+    if not collation or collation == "server_default":
+        return None
+    return collation
+
+
+def _configure_engine_collation(engine, desired_collation):
+    if not desired_collation:
+        return
+
+    if getattr(engine, "_sqlhandler_collation", None) == desired_collation:
+        return
+
+    engine._sqlhandler_collation = desired_collation
+
+    @event.listens_for(engine, "connect")
+    def _set_collation(dbapi_connection, _):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"SET NAMES utf8mb4 COLLATE {desired_collation}")
+        cursor.execute(f"SET SESSION collation_connection='{desired_collation}'")
+        cursor.close()
+
+
+def _escape_identifier(name):
+    return name.replace("`", "``")
+
+
+def _report_existing_table_collation(engine, db_name, table_name):
+    with engine.connect() as conn:
+        table_sql = text(
+            """
+            SELECT TABLE_COLLATION
+            FROM information_schema.tables
+            WHERE table_schema = :db AND table_name = :tbl
+            """
+        )
+        result = conn.execute(table_sql, {"db": db_name, "tbl": table_name}).scalar()
+        if result:
+            print(f"  ℹ️ 기존 테이블 콜레이션: '{table_name}' = {result}")
+
+
+def _report_collation_mismatch(engine, db_name, table_name, desired_collation, schema_collation):
+    has_mismatch = False
+    with engine.connect() as conn:
+        table_sql = text(
+            """
+            SELECT TABLE_COLLATION
+            FROM information_schema.tables
+            WHERE table_schema = :db AND table_name = :tbl
+            """
+        )
+        result = conn.execute(table_sql, {"db": db_name, "tbl": table_name}).scalar()
+        if result:
+            if result == desired_collation:
+                print(f"  ✅ 테이블 콜레이션 일치: '{table_name}' = {result}")
+            else:
+                db_default_text = f"DB 기본: {schema_collation}" if schema_collation else "DB 기본: 알 수 없음"
+                print(f"  ⚠️ 테이블 콜레이션 불일치: '{table_name}' = {result} (선택: {desired_collation}, {db_default_text})")
+                has_mismatch = True
+
+        col_sql = text(
+            """
+            SELECT column_name, collation_name
+            FROM information_schema.columns
+            WHERE table_schema = :db AND table_name = :tbl AND collation_name IS NOT NULL
+            """
+        )
+        rows = conn.execute(col_sql, {"db": db_name, "tbl": table_name}).fetchall()
+        mismatched = [(r[0], r[1]) for r in rows if r[1] and r[1] != desired_collation]
+        if mismatched:
+            print("  ⚠️ 컬럼 콜레이션 불일치 목록:")
+            for col_name, collation_name in mismatched:
+                print(f"    - {col_name}: {collation_name}")
+            has_mismatch = True
+    return has_mismatch
+
+
+def _apply_table_collation(engine, table_name, desired_collation, table_existed, if_exists):
+    if not desired_collation:
+        return
+
+    if if_exists == "append" and table_existed:
+        print("  ℹ️ Append 모드 + 기존 테이블: 콜레이션 변경하지 않고 진행")
+        return
+
+    safe_table = _escape_identifier(table_name)
+    alter_sql = f"ALTER TABLE `{safe_table}` CONVERT TO CHARACTER SET utf8mb4 COLLATE {desired_collation}"
+    with engine.begin() as conn:
+        conn.execute(text(alter_sql))
+    print(f"  ✅ 콜레이션 적용 완료: {desired_collation}")
+
+
+def _get_schema_collation(engine, db_name):
+    with engine.connect() as conn:
+        sql = text(
+            """
+            SELECT DEFAULT_COLLATION_NAME
+            FROM information_schema.schemata
+            WHERE schema_name = :db
+            """
+        )
+        return conn.execute(sql, {"db": db_name}).scalar()

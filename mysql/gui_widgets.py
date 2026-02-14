@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 
 def create_export_widgets(parent_frame, mode, on_query_mode_change=None):
     """
@@ -132,7 +132,8 @@ def create_import_widgets(parent_frame, mode):
     
     # Target table name - conditional
     widgets['lbl_target_table'] = tk.Label(parent_frame, text="대상 테이블명:")
-    widgets['entry_target_table'] = tk.Entry(parent_frame, width=30)
+    widgets['var_target_table'] = tk.StringVar()
+    widgets['entry_target_table'] = tk.Entry(parent_frame, width=30, textvariable=widgets['var_target_table'])
     
     # Import mode selection
     tk.Label(parent_frame, text="Import 모드:").grid(row=5, column=0, sticky="e", padx=5, pady=5)
@@ -146,6 +147,38 @@ def create_import_widgets(parent_frame, mode):
                    value="replace").pack(side="left", padx=5)
     tk.Radiobutton(frame_mode, text="Append (추가)", variable=widgets['var_import_mode'], 
                    value="append").pack(side="left", padx=5)
+
+    # Collation selection
+    tk.Label(parent_frame, text="Collation:").grid(row=6, column=0, sticky="e", padx=5, pady=5)
+    widgets['var_collation'] = tk.StringVar(value="server_default")
+    collations = [
+        "server_default",
+        "utf8mb4_uca1400_ai_ci",
+        "utf8mb4_0900_ai_ci",
+        "utf8mb4_unicode_ci",
+        "utf8mb4_general_ci",
+        "utf8mb4_bin",
+    ]
+    widgets['cmb_collation'] = ttk.Combobox(parent_frame, textvariable=widgets['var_collation'],
+                                            values=collations, state="readonly", width=27)
+    widgets['cmb_collation'].grid(row=6, column=1, sticky="w", padx=5, pady=5)
+    widgets['lbl_collation_hint'] = tk.Label(parent_frame, text="(없음=DB 기본값)", fg="gray", font=("", 8))
+    widgets['lbl_collation_hint'].grid(row=6, column=2, sticky="w", padx=5, pady=5)
+
+    # Stop on collation mismatch
+    widgets['var_stop_on_mismatch'] = tk.BooleanVar(value=True)
+    widgets['chk_stop_on_mismatch'] = tk.Checkbutton(
+        parent_frame,
+        text="콜레이션 불일치 시 중단",
+        variable=widgets['var_stop_on_mismatch']
+    )
+    widgets['chk_stop_on_mismatch'].grid(row=7, column=1, sticky="w", padx=5, pady=5)
+
+    # Collation status (single table only)
+    widgets['lbl_table_collation_title'] = tk.Label(parent_frame, text="테이블 콜레이션:")
+    widgets['lbl_table_collation_value'] = tk.Label(parent_frame, text="-", fg="gray")
+    widgets['lbl_collation_compare_title'] = tk.Label(parent_frame, text="비교 결과:")
+    widgets['lbl_collation_compare_value'] = tk.Label(parent_frame, text="-", fg="gray")
     
     # Initial state
     toggle_scope_widgets(widgets)
@@ -165,6 +198,11 @@ def toggle_scope_widgets(widgets):
         
         widgets['lbl_target_table'].grid(row=3, column=0, sticky="e", padx=5, pady=5)
         widgets['entry_target_table'].grid(row=3, column=1, sticky="w", padx=5, pady=5)
+
+        widgets['lbl_table_collation_title'].grid(row=8, column=0, sticky="e", padx=5, pady=5)
+        widgets['lbl_table_collation_value'].grid(row=8, column=1, sticky="w", padx=5, pady=5, columnspan=2)
+        widgets['lbl_collation_compare_title'].grid(row=9, column=0, sticky="e", padx=5, pady=5)
+        widgets['lbl_collation_compare_value'].grid(row=9, column=1, sticky="w", padx=5, pady=5, columnspan=2)
     else:
         # Hide source and target widgets
         widgets['lbl_source_name'].grid_forget()
@@ -173,10 +211,15 @@ def toggle_scope_widgets(widgets):
         
         widgets['lbl_target_table'].grid_forget()
         widgets['entry_target_table'].grid_forget()
+
+        widgets['lbl_table_collation_title'].grid_forget()
+        widgets['lbl_table_collation_value'].grid_forget()
+        widgets['lbl_collation_compare_title'].grid_forget()
+        widgets['lbl_collation_compare_value'].grid_forget()
         
         # Clear the entries
         widgets['entry_source_name'].delete(0, tk.END)
-        widgets['entry_target_table'].delete(0, tk.END)
+        widgets['var_target_table'].set("")
 
 
 def browse_file(widgets, mode):
@@ -209,6 +252,8 @@ def get_import_params(widgets):
     source_name = widgets['entry_source_name'].get().strip()
     target_table = widgets['entry_target_table'].get().strip()
     if_exists = widgets['var_import_mode'].get()
+    collation = widgets['var_collation'].get()
+    stop_on_mismatch = widgets['var_stop_on_mismatch'].get()
     
     if not file_path:
         return None  # Validation failed
@@ -218,7 +263,9 @@ def get_import_params(widgets):
         'import_scope': import_scope,
         'source_name': source_name if source_name else None,
         'target_table': target_table if target_table else None,
-        'if_exists': if_exists
+        'if_exists': if_exists,
+        'collation': collation if collation else "server_default",
+        'stop_on_mismatch': bool(stop_on_mismatch)
     }
 
 # --- Main Tab Entry Point ---
