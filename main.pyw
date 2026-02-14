@@ -5,9 +5,8 @@ import sys
 from dotenv import load_dotenv
 
 # Updated import paths for MySQL widgets
-from mysql.gui_widgets import create_mysql_tab
+from mysql.gui_widgets import MySQLView
 from mysql.controller import MySQLController
-from ui.log_redirect import TextRedirector
 
 # Load SQLite Modules
 from sqlite.gui_widgets import create_sqlite_tab
@@ -28,27 +27,18 @@ class DataHandlerApp:
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
         
-        # MySQL controller
-        self.mysql_controller = MySQLController(self)
-
-        # --- Tab 1: MySQL ---
-        self.tab_mysql = create_mysql_tab(self.notebook, self)
-        self.notebook.add(self.tab_mysql, text="MySQL Handler")
+        # --- Tab 1: MySQL (MVC Pattern) ---
+        self.mysql_view = MySQLView(self.notebook, self)
+        self.mysql_controller = MySQLController(self.mysql_view)
         
-        # --- Tab 2: SQLite ---
+        self.notebook.add(self.mysql_view.get_tab_frame(), text="MySQL Handler")
+        
+        # --- Tab 2: SQLite (Existing Function Pattern) ---
         self.tab_sqlite = create_sqlite_tab(self.notebook)
         self.notebook.add(self.tab_sqlite, text="SQLite Handler")
         
-        # --- Redirect stdout to MySQL log by default (or handle globally) ---
-        # For simple integration, we redirect stdout to the MySQL log widget when that tab is active
-        # But `sys.stdout` is global. A better way is a custom redirector that writes to the currently active tab's log.
-        # For now, let's keep it simple: Write to MySQL log if available.
-        # SQLite tab has its own log logic in its class.
-        if hasattr(self, 'log_text'):
-            sys.stdout = TextRedirector(self.log_text)
-
-        # Force initial UI update to show Settings for default selection
-        self.update_ui()
+        # Note: Global stdout redirection removed to decouple modules.
+        # specific modules now handle their own logging.
 
     def center_window(self):
         self.root.update_idletasks()
@@ -57,21 +47,6 @@ class DataHandlerApp:
         x = (self.root.winfo_screenwidth() // 2) - (width // 2)
         y = (self.root.winfo_screenheight() // 2) - (height // 2)
         self.root.geometry(f'{width}x{height}+{x}+{y}')
-
-    # --- MySQL Logic Methods (delegated to controller) ---
-
-    def update_db_info(self):
-        return self.mysql_controller.update_db_info()
-
-    def update_ui(self):
-        return self.mysql_controller.update_ui()
-
-    def toggle_query_panel(self, show):
-        return self.mysql_controller.toggle_query_panel(show)
-
-    def run_process(self):
-        return self.mysql_controller.run_process()
-
 
 if __name__ == "__main__":
     root = tk.Tk()
