@@ -18,7 +18,7 @@ class DataHandlerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("SQL Data Handler (MySQL & SQLite)")
-        self.root.geometry("1000x800")
+        self.root.geometry("1000x1000")
         
         # Center Window
         self.center_window()

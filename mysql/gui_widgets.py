@@ -11,6 +11,11 @@ class MySQLView:
         self.paned_window = None
         self.right_panel = None
         self.is_query_panel_visible = False
+        self.comparison_panel = None
+        self.is_comparison_panel_visible = False
+        self._comparison_col_vars = []  # list of (col_name, BooleanVar)
+        self._comparison_on_confirm = None
+        self._comparison_on_refresh = None
         
         # Initialize persistent variables here so they don't get overwritten/garbage collected
         self._init_variables()
@@ -97,6 +102,9 @@ class MySQLView:
         self.widgets['txt_query'].pack(fill="both", expand=True)
         
         tk.Label(lb_query_frame, text="* Export 범위에서 '사용자 정의 쿼리' 선택 시 사용됩니다.", fg="gray").pack(anchor="w")
+
+        # --- Comparison Panel (Right Panel for Import) - Initially hidden ---
+        self.comparison_panel = tk.Frame(self.paned_window)
 
     def get_tab_frame(self):
         return self.tab
@@ -411,3 +419,202 @@ class MySQLView:
 
     def show_error(self, title, message):
         messagebox.showerror(title, message)
+
+    # --- Comparison Panel Methods ---
+
+    def show_comparison_panel(self, table_name, df_columns, mysql_columns, table_index, total_tables, on_confirm, on_refresh):
+        """
+        Show the column comparison panel.
+
+        Args:
+            table_name: Target MySQL table name.
+            df_columns: List of DataFrame column names (already normalized).
+            mysql_columns: List of (col_name, data_type, col_key, extra) from MySQL, or None if new table.
+            table_index: Current table index (0-based) for batch display.
+            total_tables: Total number of tables to compare.
+            on_confirm: Callback when user confirms.
+            on_refresh: Callback to refresh comparison (re-fetch MySQL columns).
+        """
+        self._comparison_on_confirm = on_confirm
+        self._comparison_on_refresh = on_refresh
+
+        # Hide query panel if visible
+        if self.is_query_panel_visible:
+            self.toggle_query_panel(False)
+
+        # Clear previous content
+        for widget in self.comparison_panel.winfo_children():
+            widget.destroy()
+        self._comparison_col_vars = []
+
+        # Build MySQL column lookup
+        mysql_col_map = {}  # {col_name: (data_type, col_key, extra)}
+        mysql_col_names = set()
+        if mysql_columns:
+            for col_name, data_type, col_key, extra in mysql_columns:
+                mysql_col_map[col_name] = (data_type, col_key, extra)
+                mysql_col_names.add(col_name)
+
+        df_col_set = set(df_columns)
+
+        # Header
+        header_text = f"컬럼 비교: {table_name}"
+        if total_tables > 1:
+            header_text += f" ({table_index + 1}/{total_tables})"
+        lb_frame = tk.LabelFrame(self.comparison_panel, text=header_text, padx=10, pady=10)
+        lb_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # Table status
+        if mysql_columns:
+            status_text = f"기존 테이블 (MySQL: {len(mysql_columns)}개 컬럼, DataFrame: {len(df_columns)}개 컬럼)"
+        else:
+            status_text = f"신규 테이블 (DataFrame: {len(df_columns)}개 컬럼)"
+        tk.Label(lb_frame, text=status_text, fg="gray").pack(anchor="w", pady=(0, 5))
+
+        # Two-column comparison body
+        body = tk.Frame(lb_frame)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        # --- Left: DataFrame Columns (with checkboxes) ---
+        left_label = tk.LabelFrame(body, text="DataFrame 컬럼 (체크 해제 시 제외)", padx=5, pady=5)
+        left_label.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=5)
+
+        left_canvas = tk.Canvas(left_label, highlightthickness=0, height=400)
+        left_scrollbar = ttk.Scrollbar(left_label, orient="vertical", command=left_canvas.yview)
+        left_inner = tk.Frame(left_canvas)
+
+        left_inner.bind("<Configure>", lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all")))
+        left_canvas.create_window((0, 0), window=left_inner, anchor="nw")
+        left_canvas.configure(yscrollcommand=left_scrollbar.set)
+
+        left_canvas.pack(side="left", fill="both", expand=True)
+        left_scrollbar.pack(side="right", fill="y")
+
+        for col in df_columns:
+            var = tk.BooleanVar(value=True)
+            # Auto-uncheck auto_increment columns
+            if col in mysql_col_map:
+                _, _, extra = mysql_col_map[col]
+                if 'auto_increment' in (extra or '').lower():
+                    var.set(False)
+
+            self._comparison_col_vars.append((col, var))
+
+            # Determine color
+            if col in mysql_col_names:
+                fg_color = "#006400"  # dark green - exists in both
+            else:
+                fg_color = "#CC6600"  # orange - DataFrame only
+
+            frame_row = tk.Frame(left_inner)
+            frame_row.pack(anchor="w", fill="x")
+            cb = tk.Checkbutton(frame_row, text=col, variable=var, fg=fg_color,
+                                activeforeground=fg_color)
+            cb.pack(side="left")
+            # Show auto_increment hint
+            if col in mysql_col_map:
+                _, _, extra = mysql_col_map[col]
+                if 'auto_increment' in (extra or '').lower():
+                    tk.Label(frame_row, text="(auto_increment)", fg="gray",
+                             font=("", 8)).pack(side="left")
+
+        # --- Right: MySQL Table Columns ---
+        right_label_text = "MySQL 테이블 컬럼" if mysql_columns else "MySQL 테이블 (신규 생성 예정)"
+        right_label = tk.LabelFrame(body, text=right_label_text, padx=5, pady=5)
+        right_label.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=5)
+
+        right_canvas = tk.Canvas(right_label, highlightthickness=0, height=400)
+        right_scrollbar = ttk.Scrollbar(right_label, orient="vertical", command=right_canvas.yview)
+        right_inner = tk.Frame(right_canvas)
+
+        right_inner.bind("<Configure>", lambda e: right_canvas.configure(scrollregion=right_canvas.bbox("all")))
+        right_canvas.create_window((0, 0), window=right_inner, anchor="nw")
+        right_canvas.configure(yscrollcommand=right_scrollbar.set)
+
+        right_canvas.pack(side="left", fill="both", expand=True)
+        right_scrollbar.pack(side="right", fill="y")
+
+        if mysql_columns:
+            for col_name, data_type, col_key, extra in mysql_columns:
+                if col_name in df_col_set:
+                    fg_color = "#006400"  # green - matched
+                else:
+                    fg_color = "#999999"  # gray - MySQL only
+
+                label_text = f"{col_name} ({data_type})"
+                badges = []
+                if col_key == "PRI":
+                    badges.append("PK")
+                if 'auto_increment' in (extra or '').lower():
+                    badges.append("AI")
+                if badges:
+                    label_text += f" [{','.join(badges)}]"
+
+                tk.Label(right_inner, text=label_text, fg=fg_color, anchor="w").pack(anchor="w")
+        else:
+            tk.Label(right_inner, text="테이블이 아직 존재하지 않습니다.\n컬럼 제외만 선택할 수 있습니다.",
+                     fg="gray", justify="left").pack(anchor="w", pady=10)
+
+        # --- Mismatch summary ---
+        only_in_df = [c for c in df_columns if c not in mysql_col_names]
+        only_in_mysql = [c for c in mysql_col_names if c not in df_col_set]
+
+        summary_parts = []
+        if only_in_df:
+            summary_parts.append(f"DataFrame에만 {len(only_in_df)}개")
+        if only_in_mysql:
+            summary_parts.append(f"MySQL에만 {len(only_in_mysql)}개")
+
+        if summary_parts and mysql_columns:
+            summary_color = "#CC6600"
+            summary_text = "컬럼 차이: " + ", ".join(summary_parts)
+        elif not mysql_columns:
+            summary_color = "gray"
+            summary_text = "신규 테이블: 모든 컬럼이 새로 생성됩니다"
+        else:
+            summary_color = "#006400"
+            summary_text = "모든 컬럼 일치"
+
+        tk.Label(lb_frame, text=summary_text, fg=summary_color, font=("", 9, "bold")).pack(anchor="w", pady=(5, 0))
+
+        # --- Buttons ---
+        btn_frame = tk.Frame(lb_frame)
+        btn_frame.pack(fill="x", pady=(10, 0))
+
+        if on_refresh:
+            tk.Button(btn_frame, text="Refresh", width=12,
+                      command=self._on_comparison_refresh_clicked).pack(side="left", padx=5)
+
+        if on_confirm:
+            is_last = (table_index + 1 >= total_tables)
+            confirm_text = "Confirm & Import" if is_last else "Next"
+            tk.Button(btn_frame, text=confirm_text, width=16, bg="#4CAF50", fg="white",
+                      command=self._on_comparison_confirm_clicked).pack(side="right", padx=5)
+        else:
+            tk.Label(btn_frame, text="* 컬럼 선택 후 RUN 버튼으로 Import 실행",
+                     fg="gray", font=("", 8)).pack(side="right", padx=5)
+
+        # Show panel
+        if not self.is_comparison_panel_visible:
+            self.paned_window.add(self.comparison_panel)
+            self.is_comparison_panel_visible = True
+
+    def _on_comparison_confirm_clicked(self):
+        if self._comparison_on_confirm:
+            self._comparison_on_confirm()
+
+    def _on_comparison_refresh_clicked(self):
+        if self._comparison_on_refresh:
+            self._comparison_on_refresh()
+
+    def hide_comparison_panel(self):
+        if self.is_comparison_panel_visible:
+            self.paned_window.forget(self.comparison_panel)
+            self.is_comparison_panel_visible = False
+
+    def get_excluded_columns(self):
+        """Return list of column names where the checkbox is unchecked."""
+        return [col_name for col_name, var in self._comparison_col_vars if not var.get()]

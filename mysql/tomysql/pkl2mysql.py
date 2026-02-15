@@ -2,10 +2,10 @@ import pandas as pd
 from sqlalchemy import create_engine, inspect, text, event
 import os
 
-def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, target_table=None, if_exists="replace", collation="server_default", stop_on_mismatch=True):
+def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, target_table=None, if_exists="replace", collation="server_default", stop_on_mismatch=True, excluded_columns=None, logger=None):
     """
     Imports a Pickle file to MySQL. Supports both single table and full import.
-    
+
     Args:
         db_config (dict): Dictionary with keys 'host', 'port', 'user', 'password', 'database'.
         file_path (str): Path to the Pickle file.
@@ -15,7 +15,10 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
         if_exists (str): 'replace' to drop existing table, 'append' to add to existing table.
         collation (str): Target collation, or 'server_default'.
         stop_on_mismatch (bool): Stop import when collation mismatch is detected.
+        excluded_columns (dict, optional): {table_name: [col_names_to_exclude]}.
+        logger (callable, optional): Logging function. Defaults to print.
     """
+    log = logger or print
     try:
         db_url = (
             f"mysql+pymysql://{db_config['user']}:{db_config['password']}"
@@ -27,14 +30,14 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
         schema_collation = _get_schema_collation(engine, db_config['database'])
         selected_text = desired_collation or "server_default"
         if schema_collation:
-            print(f"ℹ️ [pkl2mysql] 선택 콜레이션: {selected_text} (DB 기본: {schema_collation})")
+            log(f"ℹ️ [pkl2mysql] 선택 콜레이션: {selected_text} (DB 기본: {schema_collation})")
         else:
-            print(f"ℹ️ [pkl2mysql] 선택 콜레이션: {selected_text}")
-        print(f"✅ [pkl2mysql] 데이터베이스 연결 성공!")
-        
+            log(f"ℹ️ [pkl2mysql] 선택 콜레이션: {selected_text}")
+        log(f"✅ [pkl2mysql] 데이터베이스 연결 성공!")
+
         # Load pickle file
         data = pd.read_pickle(file_path)
-        
+
         # Determine tables to import based on scope
         if import_scope == "single":
             # Single table import
@@ -44,65 +47,79 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
                     if source_name not in data:
                         raise ValueError(f"키 '{source_name}'을 찾을 수 없습니다. 사용 가능한 키: {', '.join(data.keys())}")
                     df = data[source_name]
-                    print(f"✅ [pkl2mysql] Dictionary에서 키 '{source_name}' 추출 완료: {df.shape[0]} rows, {df.shape[1]} columns")
+                    log(f"✅ [pkl2mysql] Dictionary에서 키 '{source_name}' 추출 완료: {df.shape[0]} rows, {df.shape[1]} columns")
                 else:
                     raise ValueError("Dictionary Pickle에서 특정 테이블을 Import하려면 소스 지정(키)이 필요합니다.")
             else:
                 # DataFrame: Use as-is
                 df = data
-                print(f"✅ [pkl2mysql] DataFrame 로딩 완료: {df.shape[0]} rows, {df.shape[1]} columns")
-            
+                log(f"✅ [pkl2mysql] DataFrame 로딩 완료: {df.shape[0]} rows, {df.shape[1]} columns")
+
             if not target_table:
                 raise ValueError("특정 테이블 Import 모드에서는 대상 테이블명이 필요합니다.")
-            
+
             tables_to_import = {target_table: df}
-            
+
         else:
             # Full import
             if isinstance(data, dict):
                 # Dictionary: Use all key-value pairs
-                print(f"✅ [pkl2mysql] Dictionary 형식 Pickle 로딩 완료: {len(data)}개 테이블")
+                log(f"✅ [pkl2mysql] Dictionary 형식 Pickle 로딩 완료: {len(data)}개 테이블")
                 tables_to_import = data
             else:
                 # DataFrame: Use filename as table name
                 df = data
-                print(f"✅ [pkl2mysql] DataFrame 로딩 완료: {df.shape[0]} rows, {df.shape[1]} columns")
+                log(f"✅ [pkl2mysql] DataFrame 로딩 완료: {df.shape[0]} rows, {df.shape[1]} columns")
                 table_name = os.path.basename(file_path).split('.')[0]
-                print(f"ℹ️ [pkl2mysql] 파일명을 테이블명으로 사용: '{table_name}'")
+                log(f"ℹ️ [pkl2mysql] 파일명을 테이블명으로 사용: '{table_name}'")
                 tables_to_import = {table_name: df}
-        
+
         # Process each table
         imported_count = 0
         inspector = inspect(engine)
         existing_tables = set(inspector.get_table_names())
 
         for tbl_name, df in tables_to_import.items():
-            print(f"\n▶ [pkl2mysql] 테이블 '{tbl_name}' 처리 중... ({df.shape[0]} rows, {df.shape[1]} columns)")
-            
+            log(f"\n▶ [pkl2mysql] 테이블 '{tbl_name}' 처리 중... ({df.shape[0]} rows, {df.shape[1]} columns)")
+
             # Clean column names
             df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
-            
+
+            # Drop excluded columns
+            cols_to_drop = []
+            if excluded_columns and tbl_name in excluded_columns:
+                cols_to_drop = [c for c in excluded_columns[tbl_name] if c in df.columns]
+                if cols_to_drop:
+                    df = df.drop(columns=cols_to_drop)
+                    log(f"  ⏭️ 제외된 컬럼: {', '.join(cols_to_drop)}")
+
             table_existed = tbl_name in existing_tables
             if table_existed:
-                _report_existing_table_collation(engine, db_config['database'], tbl_name)
+                _report_existing_table_collation(engine, db_config['database'], tbl_name, log)
                 if desired_collation:
-                    mismatch = _report_collation_mismatch(engine, db_config['database'], tbl_name, desired_collation, schema_collation)
+                    mismatch = _report_collation_mismatch(engine, db_config['database'], tbl_name, desired_collation, schema_collation, log)
                     if mismatch and stop_on_mismatch:
                         raise ValueError(f"콜레이션 불일치로 중단: 테이블 '{tbl_name}'")
             elif import_scope == "single":
-                print(f"  ℹ️ 대상 테이블 '{tbl_name}' 미존재: 신규 생성 예정")
+                log(f"  ℹ️ 대상 테이블 '{tbl_name}' 미존재: 신규 생성 예정")
+
+            # Replace + existing table + excluded columns → TRUNCATE + append to preserve schema
+            effective_if_exists = if_exists
+            if if_exists == "replace" and table_existed and cols_to_drop:
+                _truncate_table(engine, tbl_name, log)
+                effective_if_exists = "append"
 
             # Import based on if_exists mode using pandas.to_sql
-            _import_single_table(df, tbl_name, engine, if_exists, desired_collation, table_existed)
-            
+            _import_single_table(df, tbl_name, engine, effective_if_exists, desired_collation, table_existed, log)
+
             imported_count += 1
-        
+
         scope_text = f"'{target_table}'" if import_scope == "single" else f"{imported_count}개 테이블"
-        print(f"\n🎉 [pkl2mysql] {scope_text} Import 완료!")
+        log(f"\n🎉 [pkl2mysql] {scope_text} Import 완료!")
         return True
 
     except Exception as e:
-        print(f"❌ [pkl2mysql] 오류 발생: {e}")
+        log(f"❌ [pkl2mysql] 오류 발생: {e}")
         raise e
     finally:
         pass
@@ -116,7 +133,7 @@ def _insert_ignore(table, conn, keys, data_iter):
     conn.execute(stmt)
 
 
-def _import_single_table(df, table_name, engine, if_exists, desired_collation, table_existed):
+def _import_single_table(df, table_name, engine, if_exists, desired_collation, table_existed, log=print):
     """Import a single DataFrame to MySQL table using pandas.to_sql."""
     # Clean column names
     df.columns = [col.strip().replace(" ", "_").lower() for col in df.columns]
@@ -129,20 +146,20 @@ def _import_single_table(df, table_name, engine, if_exists, desired_collation, t
 
     if if_exists == "replace":
         if table_existed:
-            print(f"  🗑️ 기존 테이블 '{table_name}' 삭제 후 재생성")
+            log(f"  🗑️ 기존 테이블 '{table_name}' 삭제 후 재생성")
         else:
-            print(f"  ℹ️ 테이블 '{table_name}' 신규 생성")
+            log(f"  ℹ️ 테이블 '{table_name}' 신규 생성")
     else:
         if table_existed:
-            print(f"  ✅ 기존 테이블 '{table_name}'에 데이터 추가 (중복 키 Skip)")
+            log(f"  ✅ 기존 테이블 '{table_name}'에 데이터 추가 (중복 키 Skip)")
         else:
-            print(f"  ℹ️ 테이블 '{table_name}' 신규 생성 후 데이터 삽입")
+            log(f"  ℹ️ 테이블 '{table_name}' 신규 생성 후 데이터 삽입")
 
-    print(f"  ▶ Import 중 ({mode_text} 모드)...")
+    log(f"  ▶ Import 중 ({mode_text} 모드)...")
     method = _insert_ignore if (if_exists == "append" and table_existed) else "multi"
     df.to_sql(name=table_name, con=engine, index=False, if_exists=if_exists, method=method)
-    _apply_table_collation(engine, table_name, desired_collation, table_existed, if_exists)
-    print(f"  ✅ {len(df)} rows Import 완료")
+    _apply_table_collation(engine, table_name, desired_collation, table_existed, if_exists, log)
+    log(f"  ✅ {len(df)} rows Import 완료")
 
 
 def _normalize_collation(collation):
@@ -168,11 +185,19 @@ def _configure_engine_collation(engine, desired_collation):
         cursor.close()
 
 
+def _truncate_table(engine, table_name, log=print):
+    """TRUNCATE table to clear data while preserving schema."""
+    safe_table = _escape_identifier(table_name)
+    with engine.begin() as conn:
+        conn.execute(text(f"TRUNCATE TABLE `{safe_table}`"))
+    log(f"  🗑️ 기존 테이블 '{table_name}' 데이터 초기화 (스키마 보존)")
+
+
 def _escape_identifier(name):
     return name.replace("`", "``")
 
 
-def _report_existing_table_collation(engine, db_name, table_name):
+def _report_existing_table_collation(engine, db_name, table_name, log=print):
     with engine.connect() as conn:
         table_sql = text(
             """
@@ -183,10 +208,10 @@ def _report_existing_table_collation(engine, db_name, table_name):
         )
         result = conn.execute(table_sql, {"db": db_name, "tbl": table_name}).scalar()
         if result:
-            print(f"  ℹ️ 기존 테이블 콜레이션: '{table_name}' = {result}")
+            log(f"  ℹ️ 기존 테이블 콜레이션: '{table_name}' = {result}")
 
 
-def _report_collation_mismatch(engine, db_name, table_name, desired_collation, schema_collation):
+def _report_collation_mismatch(engine, db_name, table_name, desired_collation, schema_collation, log=print):
     has_mismatch = False
     with engine.connect() as conn:
         table_sql = text(
@@ -199,10 +224,10 @@ def _report_collation_mismatch(engine, db_name, table_name, desired_collation, s
         result = conn.execute(table_sql, {"db": db_name, "tbl": table_name}).scalar()
         if result:
             if result == desired_collation:
-                print(f"  ✅ 테이블 콜레이션 일치: '{table_name}' = {result}")
+                log(f"  ✅ 테이블 콜레이션 일치: '{table_name}' = {result}")
             else:
                 db_default_text = f"DB 기본: {schema_collation}" if schema_collation else "DB 기본: 알 수 없음"
-                print(f"  ⚠️ 테이블 콜레이션 불일치: '{table_name}' = {result} (선택: {desired_collation}, {db_default_text})")
+                log(f"  ⚠️ 테이블 콜레이션 불일치: '{table_name}' = {result} (선택: {desired_collation}, {db_default_text})")
                 has_mismatch = True
 
         col_sql = text(
@@ -215,26 +240,26 @@ def _report_collation_mismatch(engine, db_name, table_name, desired_collation, s
         rows = conn.execute(col_sql, {"db": db_name, "tbl": table_name}).fetchall()
         mismatched = [(r[0], r[1]) for r in rows if r[1] and r[1] != desired_collation]
         if mismatched:
-            print("  ⚠️ 컬럼 콜레이션 불일치 목록:")
+            log("  ⚠️ 컬럼 콜레이션 불일치 목록:")
             for col_name, collation_name in mismatched:
-                print(f"    - {col_name}: {collation_name}")
+                log(f"    - {col_name}: {collation_name}")
             has_mismatch = True
     return has_mismatch
 
 
-def _apply_table_collation(engine, table_name, desired_collation, table_existed, if_exists):
+def _apply_table_collation(engine, table_name, desired_collation, table_existed, if_exists, log=print):
     if not desired_collation:
         return
 
     if if_exists == "append" and table_existed:
-        print("  ℹ️ Append 모드 + 기존 테이블: 콜레이션 변경하지 않고 진행")
+        log("  ℹ️ Append 모드 + 기존 테이블: 콜레이션 변경하지 않고 진행")
         return
 
     safe_table = _escape_identifier(table_name)
     alter_sql = f"ALTER TABLE `{safe_table}` CONVERT TO CHARACTER SET utf8mb4 COLLATE {desired_collation}"
     with engine.begin() as conn:
         conn.execute(text(alter_sql))
-    print(f"  ✅ 콜레이션 적용 완료: {desired_collation}")
+    log(f"  ✅ 콜레이션 적용 완료: {desired_collation}")
 
 
 def _get_schema_collation(engine, db_name):
