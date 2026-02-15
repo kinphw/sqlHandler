@@ -428,6 +428,9 @@ class MySQLView:
     def show_error(self, title, message):
         messagebox.showerror(title, message)
 
+    def show_confirm(self, title, message):
+        return messagebox.askokcancel(title, message)
+
     # --- Comparison Panel Methods ---
 
     def show_comparison_panel(self, table_name, df_columns, mysql_columns, table_index, total_tables, on_confirm, on_refresh):

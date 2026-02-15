@@ -564,6 +564,14 @@ class MySQLController:
         if not ctx:
             return
 
+        if self.view.get_prod_checked():
+            if not self.view.show_confirm(
+                "운영환경 Import 확인",
+                "운영환경에 대한 Import입니다. 정말 진행하시겠습니까?"
+            ):
+                self.view.log("[Import] 운영환경 Import가 취소되었습니다.")
+                return
+
         try:
             db_url = ctx['db_url']
             db_config = ctx['db_config']
