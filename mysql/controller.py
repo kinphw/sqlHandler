@@ -21,6 +21,7 @@ class MySQLController:
         
         # Bind Events
         self.view.bind_event('run_button', self.run_process)
+        self.view.bind_event('release_button', self.release_all)
         self.view.bind_event('db_prod_change', self.update_db_info)
         self.view.bind_event('mode_change', self.on_mode_change)
         
@@ -75,7 +76,19 @@ class MySQLController:
         if self.tunnel:
             self.tunnel.stop()
             self.tunnel = None
-            print("🔒 SSH Tunnel Closed.") 
+            print("🔒 SSH Tunnel Closed.")
+
+    def release_all(self):
+        """모든 파일 핸들, DB 연결, 캐시를 해제"""
+        self._close_tunnel()
+        self._cached_source_columns = {}
+        self._import_context = None
+        self.view.hide_comparison_panel()
+
+        import gc
+        gc.collect()
+
+        self.view.log("[Release] 모든 리소스가 해제되었습니다.")
 
     @staticmethod
     def _normalize_columns(columns):
@@ -112,8 +125,8 @@ class MySQLController:
                     self.view.update_source_dropdown([], help_text)
 
             elif mode == "xlsx2mysql":
-                xls = pd.ExcelFile(filepath)
-                sheets = xls.sheet_names
+                with pd.ExcelFile(filepath) as xls:
+                    sheets = xls.sheet_names
                 help_text = f"(시트: {len(sheets)}개, 비워두면 첫 시트)"
                 self.view.update_source_dropdown(sheets, help_text)
                 # Cache columns for each sheet (headers only)

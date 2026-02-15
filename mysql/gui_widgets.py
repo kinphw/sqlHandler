@@ -90,9 +90,15 @@ class MySQLView:
         self.widgets['log_text'] = scrolledtext.ScrolledText(lb_log_frame, height=15, state='disabled', wrap='word')
         self.widgets['log_text'].pack(fill="both", expand=True)
         
-        # --- Action Button (Left Panel) ---
-        self.widgets['btn_run'] = tk.Button(left_panel, text="RUN", height=2, bg="#dddddd")
-        self.widgets['btn_run'].pack(fill="x", padx=10, pady=10)
+        # --- Action Buttons (Left Panel) ---
+        btn_frame = tk.Frame(left_panel)
+        btn_frame.pack(fill="x", padx=10, pady=10)
+
+        self.widgets['btn_run'] = tk.Button(btn_frame, text="RUN", height=2, bg="#dddddd")
+        self.widgets['btn_run'].pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        self.widgets['btn_release'] = tk.Button(btn_frame, text="Release", height=2, bg="#ffcccc")
+        self.widgets['btn_release'].pack(side="left", fill="x", expand=True, padx=(5, 0))
 
         # --- Query Input Section (Right Panel) ---
         lb_query_frame = tk.LabelFrame(self.right_panel, text="SQL Query Input (For Query Mode)", padx=10, pady=10)
@@ -395,6 +401,8 @@ class MySQLView:
         # Helper to bind events or commands to specific widgets
         if key == 'run_button':
             if 'btn_run' in self.widgets: self.widgets['btn_run'].config(command=handler)
+        elif key == 'release_button':
+            if 'btn_release' in self.widgets: self.widgets['btn_release'].config(command=handler)
         elif key == 'db_prod_change':
             if 'chk_prod' in self.widgets: self.widgets['chk_prod'].config(command=handler)
         elif key == 'mode_change':
