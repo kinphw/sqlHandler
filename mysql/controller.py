@@ -611,3 +611,6 @@ class MySQLController:
         finally:
             self._close_tunnel()
             self._import_context = None
+            # Import 후 비교 패널 복원 (연속 Import 지원)
+            if self._cached_source_columns:
+                self._refresh_comparison_preview()

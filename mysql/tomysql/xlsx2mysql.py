@@ -20,6 +20,7 @@ def import_from_xlsx(db_url, file_path, import_scope="all", source_name=None, ta
         logger (callable, optional): Logging function. Defaults to print.
     """
     log = logger or print
+    engine = None
     try:
         engine = create_engine(db_url)
         desired_collation = _normalize_collation(collation)
@@ -123,6 +124,10 @@ def import_from_xlsx(db_url, file_path, import_scope="all", source_name=None, ta
     except Exception as e:
         log(f"❌ [xlsx2mysql] 오류 발생: {e}")
         raise e
+    finally:
+        if engine:
+            engine.dispose()
+            log(f"🔒 [xlsx2mysql] 데이터베이스 연결 해제")
 
 
 def _insert_ignore(table, conn, keys, data_iter):
@@ -137,7 +142,7 @@ def _import_single_table(df, table_name, engine, if_exists, desired_collation, t
     """Import a single DataFrame to MySQL table."""
     # _x000D_ 처리 (Excel 특수 문자)
     for col in df.select_dtypes(include=['object']).columns:
-        df[col] = df[col].astype(str).str.replace('_x000D_', '', regex=False)
+        df[col] = df[col].str.replace('_x000D_', '', regex=False)
 
     mode_text = "대체" if if_exists == "replace" else "추가"
 

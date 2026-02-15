@@ -140,7 +140,7 @@ def _import_single_table(df, table_name, engine, if_exists, desired_collation, t
 
     # _x000D_ 처리 (Excel 특수 문자와 동일하게 정리)
     for col in df.select_dtypes(include=['object']).columns:
-        df[col] = df[col].astype(str).str.replace('_x000D_', '', regex=False)
+        df[col] = df[col].str.replace('_x000D_', '', regex=False)
 
     mode_text = "대체" if if_exists == "replace" else "추가"
 
