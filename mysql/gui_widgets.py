@@ -21,12 +21,13 @@ class MySQLView:
         # Persistent variables that need to keep their state/bindings across UI updates
         self.widgets['var_prod'] = tk.BooleanVar(value=True)
         self.widgets['var_mode'] = tk.StringVar(value="mysql2xlsx")
-        
+
         # Export vars
         self.widgets['var_export_scope'] = tk.StringVar(value="table")
-        
+
         # Import vars
         self.widgets['var_import_scope'] = tk.StringVar(value="all")
+        self.widgets['var_source_name'] = tk.StringVar()
         self.widgets['var_target_table'] = tk.StringVar()
         self.widgets['var_import_mode'] = tk.StringVar(value="replace")
         self.widgets['var_collation'] = tk.StringVar(value="server_default")
@@ -160,6 +161,7 @@ class MySQLView:
             on_query_mode_change(scope == "query")
 
     def _create_import_widgets(self, mode):
+        self._on_file_selected = None  # callback set by controller
         # File path selection
         tk.Label(self.lb_input_frame, text="파일 경로:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
         self.widgets['entry_file_path'] = tk.Entry(self.lb_input_frame, width=30)
@@ -180,10 +182,12 @@ class MySQLView:
         tk.Radiobutton(frame_scope, text="전체 (모든 키/시트)", variable=self.widgets['var_import_scope'], 
                        value="all", command=self._toggle_import_scope_widgets).pack(side="left", padx=5)
         
-        # Source name (Dictionary key or Sheet name) - conditional
+        # Source name (Dictionary key or Sheet name) - conditional, as Combobox
         self.widgets['lbl_source_name'] = tk.Label(self.lb_input_frame, text="소스 지정:")
-        self.widgets['entry_source_name'] = tk.Entry(self.lb_input_frame, width=30)
-        
+        self.widgets['cmb_source_name'] = ttk.Combobox(
+            self.lb_input_frame, textvariable=self.widgets['var_source_name'], width=27
+        )
+
         # Help text for source
         help_text = "(Dictionary 키 또는 시트명)" if mode == "pkl2mysql" else "(시트명, 비워두면 첫 시트)"
         self.widgets['lbl_source_help'] = tk.Label(self.lb_input_frame, text=help_text, fg="gray", font=("", 8))
@@ -245,7 +249,7 @@ class MySQLView:
         if import_scope == "single":
             # Show source and target widgets
             self.widgets['lbl_source_name'].grid(row=2, column=0, sticky="e", padx=5, pady=5)
-            self.widgets['entry_source_name'].grid(row=2, column=1, sticky="w", padx=5, pady=5)
+            self.widgets['cmb_source_name'].grid(row=2, column=1, sticky="w", padx=5, pady=5)
             self.widgets['lbl_source_help'].grid(row=2, column=2, sticky="w", padx=5, pady=5)
             
             self.widgets['lbl_target_table'].grid(row=3, column=0, sticky="e", padx=5, pady=5)
@@ -258,9 +262,9 @@ class MySQLView:
         else:
             # Hide source and target widgets
             self.widgets['lbl_source_name'].grid_forget()
-            self.widgets['entry_source_name'].grid_forget()
+            self.widgets['cmb_source_name'].grid_forget()
             self.widgets['lbl_source_help'].grid_forget()
-            
+
             self.widgets['lbl_target_table'].grid_forget()
             self.widgets['entry_target_table'].grid_forget()
 
@@ -268,11 +272,8 @@ class MySQLView:
             self.widgets['lbl_table_collation_value'].grid_forget()
             self.widgets['lbl_collation_compare_title'].grid_forget()
             self.widgets['lbl_collation_compare_value'].grid_forget()
-            
-            # Note: We do NOT clear the variables here to strictly persist, 
-            # or we can clear them if that's the desired UX. 
-            # Original code cleared them.
-            if 'entry_source_name' in self.widgets: self.widgets['entry_source_name'].delete(0, tk.END)
+
+            self.widgets['var_source_name'].set("")
             self.widgets['var_target_table'].set("")
 
     def _browse_file(self, mode):
@@ -283,11 +284,14 @@ class MySQLView:
             filetypes = [("Pickle files", "*.pkl")]
         elif mode == "xlsx2mysql":
             filetypes = [("Excel files", "*.xlsx *.xls")]
-        
+
         filepath = filedialog.askopenfilename(filetypes=filetypes)
         if filepath:
             self.widgets['entry_file_path'].delete(0, tk.END)
             self.widgets['entry_file_path'].insert(0, filepath)
+            # Trigger source list update callback if registered
+            if self._on_file_selected:
+                self._on_file_selected(filepath, mode)
 
     # --- Public Accessor Methods for Controller ---
 
@@ -320,8 +324,8 @@ class MySQLView:
     def get_import_params(self):
         file_path = self.widgets['entry_file_path'].get().strip()
         if not file_path: return None
-        
-        source_name = self.widgets['entry_source_name'].get().strip()
+
+        source_name = self.widgets['var_source_name'].get().strip()
         target_table = self.widgets['entry_target_table'].get().strip()
         
         return {
@@ -341,6 +345,21 @@ class MySQLView:
             'target_table': self.widgets['var_target_table'].get().strip(),
             'collation': self.widgets['var_collation'].get() or "server_default"
         }
+
+    def set_on_file_selected(self, callback):
+        """Register callback for file selection: callback(filepath, mode)"""
+        self._on_file_selected = callback
+
+    def update_source_dropdown(self, values, help_text=None):
+        """Update the source name combobox with given values."""
+        if 'cmb_source_name' in self.widgets:
+            self.widgets['cmb_source_name']['values'] = values
+            if values:
+                self.widgets['var_source_name'].set(values[0])
+            else:
+                self.widgets['var_source_name'].set("")
+        if help_text and 'lbl_source_help' in self.widgets:
+            self.widgets['lbl_source_help'].config(text=help_text)
 
     def update_collation_dropdown(self, values, current=None):
         if 'cmb_collation' in self.widgets:

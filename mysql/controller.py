@@ -1,5 +1,7 @@
 import os
+import pickle
 import threading
+import pandas as pd
 from mysql.frommysql.mysql2xlsx import export_to_xlsx
 from mysql.frommysql.mysql2pkl import export_to_pkl
 from mysql.tomysql.xlsx2mysql import import_from_xlsx as mysql_import_xlsx
@@ -44,6 +46,7 @@ class MySQLController:
         self.view.update_input_widgets(mode, on_query_mode_change)
         
         if mode in ["xlsx2mysql", "pkl2mysql"]:
+            self.view.set_on_file_selected(self.on_file_selected)
             self.populate_collation_dropdown()
             self.attach_collation_ui_handlers()
             self.schedule_collation_status_update()
@@ -68,6 +71,37 @@ class MySQLController:
             self.tunnel.stop()
             self.tunnel = None
             print("🔒 SSH Tunnel Closed.") 
+
+    def on_file_selected(self, filepath, mode):
+        """Inspect selected file and populate source dropdown with keys/sheets."""
+        if not filepath or not os.path.isfile(filepath):
+            self.view.update_source_dropdown([], None)
+            return
+
+        try:
+            if mode == "pkl2mysql":
+                with open(filepath, 'rb') as f:
+                    data = pickle.load(f)
+                if isinstance(data, dict):
+                    keys = list(data.keys())
+                    help_text = f"(Dictionary: {len(keys)}개 키)"
+                    self.view.update_source_dropdown([str(k) for k in keys], help_text)
+                elif isinstance(data, pd.DataFrame):
+                    help_text = "(단일 DataFrame)"
+                    self.view.update_source_dropdown([], help_text)
+                else:
+                    help_text = f"(타입: {type(data).__name__})"
+                    self.view.update_source_dropdown([], help_text)
+
+            elif mode == "xlsx2mysql":
+                xls = pd.ExcelFile(filepath)
+                sheets = xls.sheet_names
+                help_text = f"(시트: {len(sheets)}개, 비워두면 첫 시트)"
+                self.view.update_source_dropdown(sheets, help_text)
+
+        except Exception as e:
+            self.view.log(f"[WARN] 파일 분석 실패: {e}")
+            self.view.update_source_dropdown([], "(파일 읽기 실패)")
 
     def populate_collation_dropdown(self):
         try:

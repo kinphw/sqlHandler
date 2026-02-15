@@ -108,6 +108,14 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
         pass
 
 
+def _insert_ignore(table, conn, keys, data_iter):
+    """Custom insert method for pandas to_sql that uses INSERT IGNORE."""
+    from sqlalchemy.dialects.mysql import insert
+    data = [dict(zip(keys, row)) for row in data_iter]
+    stmt = insert(table.table).prefix_with("IGNORE").values(data)
+    conn.execute(stmt)
+
+
 def _import_single_table(df, table_name, engine, if_exists, desired_collation, table_existed):
     """Import a single DataFrame to MySQL table using pandas.to_sql."""
     # Clean column names
@@ -126,12 +134,13 @@ def _import_single_table(df, table_name, engine, if_exists, desired_collation, t
             print(f"  ℹ️ 테이블 '{table_name}' 신규 생성")
     else:
         if table_existed:
-            print(f"  ✅ 기존 테이블 '{table_name}'에 데이터 추가")
+            print(f"  ✅ 기존 테이블 '{table_name}'에 데이터 추가 (중복 키 Skip)")
         else:
             print(f"  ℹ️ 테이블 '{table_name}' 신규 생성 후 데이터 삽입")
 
     print(f"  ▶ Import 중 ({mode_text} 모드)...")
-    df.to_sql(name=table_name, con=engine, index=False, if_exists=if_exists)
+    method = _insert_ignore if (if_exists == "append" and table_existed) else "multi"
+    df.to_sql(name=table_name, con=engine, index=False, if_exists=if_exists, method=method)
     _apply_table_collation(engine, table_name, desired_collation, table_existed, if_exists)
     print(f"  ✅ {len(df)} rows Import 완료")
 
