@@ -115,6 +115,16 @@ sqlHandler/
 └── README.md
 ```
 
+## 유사 프로젝트 (GitHub 검색 결과)
+
+아래는 GitHub 공개 저장소에서 "MySQL ↔ Excel import/export" 키워드로 검색한 유사 프로젝트입니다.
+기능 범위나 사용 언어가 다를 수 있으니, 필요에 맞게 비교해보세요. (검색일: 2026-02-13)
+
+- [merofeev/mysql2xlsx](https://github.com/merofeev/mysql2xlsx): MySQL 전체 DB를 Excel(xlsx)로 내보내는 파이썬 스크립트
+- [BOOMER74/excel_mysql](https://github.com/BOOMER74/excel_mysql): Excel ↔ MySQL import/export 모듈(PHP, PHPExcel 기반)
+- [fccn/nau-database-exporter](https://github.com/fccn/nau-database-exporter): Open edX MySQL 데이터를 Excel/Google Sheet로 내보내는 파이썬 도구
+- [junffzhou/excel_import_export_tool](https://github.com/junffzhou/excel_import_export_tool): Golang 기반 MySQL Excel import/export 도구
+
 ## 라이선스
 
 MIT License
