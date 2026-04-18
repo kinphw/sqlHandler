@@ -24,7 +24,7 @@ class MySQLView:
 
     def _init_variables(self):
         # Persistent variables that need to keep their state/bindings across UI updates
-        self.widgets['var_prod'] = tk.BooleanVar(value=True)
+        self.widgets['var_prod'] = tk.BooleanVar(value=False)
         self.widgets['var_mode'] = tk.StringVar(value="mysql2xlsx")
 
         # Export vars
