@@ -1,5 +1,6 @@
 import pandas as pd
 from sqlalchemy import create_engine, text
+from mysql.services.query_safety import validate_read_only_query
 
 def export_to_pkl(db_url, export_scope, table_name=None, query=None, output_path=None):
     """
@@ -12,6 +13,7 @@ def export_to_pkl(db_url, export_scope, table_name=None, query=None, output_path
         query (str or None): Custom SQL query (for 'query' scope).
         output_path (str): Path to save the Pickle file.
     """
+    engine = None
     try:
         engine = create_engine(db_url)
         print(f"✅ [mysql2pkl] 데이터베이스 연결 성공!")
@@ -20,7 +22,9 @@ def export_to_pkl(db_url, export_scope, table_name=None, query=None, output_path
             # 사용자 정의 쿼리 실행
             if not query:
                 raise ValueError("쿼리 스코프를 선택했을 경우, 'query' 인자는 필수입니다.")
-            
+
+            validate_read_only_query(query)
+
             print(f"▶ [mysql2pkl] 사용자 정의 쿼리 실행 중...")
             df = pd.read_sql(text(query), con=engine)
             print(f"✅ [mysql2pkl] 쿼리 실행 완료: {df.shape[0]} rows, {df.shape[1]} columns")
@@ -76,3 +80,6 @@ def export_to_pkl(db_url, export_scope, table_name=None, query=None, output_path
     except Exception as e:
         print(f"❌ [mysql2pkl] 오류 발생: {e}")
         raise e
+    finally:
+        if engine:
+            engine.dispose()

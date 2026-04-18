@@ -1,5 +1,6 @@
 import pandas as pd
 from sqlalchemy import create_engine
+from mysql.services.query_safety import validate_read_only_query
 
 def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_path=None):
     """
@@ -12,6 +13,7 @@ def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_pat
         query (str, optional): Custom SQL query (for 'query' scope).
         output_path (str): Path to save the Excel file.
     """
+    engine = None
     try:
         engine = create_engine(db_url)
         print(f"✅ [mysql2xlsx] 데이터베이스 연결 성공!")
@@ -22,6 +24,8 @@ def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_pat
                 raise ValueError("쿼리 스코프를 선택했을 경우, 'query' 인자는 필수입니다.")
             if not output_path:
                 raise ValueError("쿼리 스코프를 선택했을 경우, 'output_path' 인자는 필수입니다.")
+
+            validate_read_only_query(query)
 
             print(f"▶ [mysql2xlsx] 사용자 정의 쿼리 실행 중...")
             
@@ -100,3 +104,6 @@ def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_pat
     except Exception as e:
         print(f"❌ [mysql2xlsx] 오류 발생: {e}")
         raise e
+    finally:
+        if engine:
+            engine.dispose()

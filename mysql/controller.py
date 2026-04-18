@@ -9,6 +9,7 @@ from mysql.tomysql.pkl2mysql import import_from_pkl as mysql_import_pkl
 from mysql.services.db_connection import get_db_url_and_config
 from mysql.services.collation_service import fetch_server_collations, fetch_table_collation_info
 from mysql.services.column_service import fetch_table_columns
+from mysql.services.query_safety import validate_read_only_query
 
 class MySQLController:
     def __init__(self, view):
@@ -284,6 +285,7 @@ class MySQLController:
                     if not query:
                         self.view.show_warning("Warning", "Enter a query.")
                         return
+                    validate_read_only_query(query)
 
                 if mode == "mysql2xlsx":
                     ext = ".xlsx"
