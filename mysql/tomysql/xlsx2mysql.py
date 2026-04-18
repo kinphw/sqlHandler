@@ -1,7 +1,8 @@
 import pandas as pd
-from sqlalchemy import create_engine, inspect, text, event
+from sqlalchemy import inspect, text, event
 from sqlalchemy.engine.url import make_url
 import os
+from mysql.services.engine_factory import create_mysql_engine, dispose_mysql_engine
 
 def import_from_xlsx(db_url, file_path, import_scope="all", source_name=None, target_table=None, if_exists="replace", collation="server_default", stop_on_mismatch=True, excluded_columns=None, logger=None):
     """
@@ -22,7 +23,7 @@ def import_from_xlsx(db_url, file_path, import_scope="all", source_name=None, ta
     log = logger or print
     engine = None
     try:
-        engine = create_engine(db_url)
+        engine = create_mysql_engine(db_url)
         desired_collation = _normalize_collation(collation)
         _configure_engine_collation(engine, desired_collation)
         log(f"✅ [xlsx2mysql] 데이터베이스 연결 성공!")
@@ -143,9 +144,7 @@ def import_from_xlsx(db_url, file_path, import_scope="all", source_name=None, ta
         log(f"❌ [xlsx2mysql] 오류 발생: {e}")
         raise e
     finally:
-        if engine:
-            engine.dispose()
-            log(f"🔒 [xlsx2mysql] 데이터베이스 연결 해제")
+        dispose_mysql_engine(engine, logger=log, label="xlsx2mysql")
 
 
 def _insert_ignore(table, conn, keys, data_iter):

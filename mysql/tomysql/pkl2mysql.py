@@ -1,6 +1,7 @@
 import pandas as pd
-from sqlalchemy import create_engine, inspect, text, event
+from sqlalchemy import inspect, text, event
 import os
+from mysql.services.engine_factory import create_mysql_engine, dispose_mysql_engine
 
 def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, target_table=None, if_exists="replace", collation="server_default", stop_on_mismatch=True, excluded_columns=None, logger=None):
     """
@@ -25,7 +26,7 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
             f"mysql+pymysql://{db_config['user']}:{db_config['password']}"
             f"@{db_config['host']}:{int(db_config['port'])}/{db_config['database']}?charset=utf8mb4"
         )
-        engine = create_engine(db_url)
+        engine = create_mysql_engine(db_url)
         desired_collation = _normalize_collation(collation)
         _configure_engine_collation(engine, desired_collation)
         schema_collation = _get_schema_collation(engine, db_config['database'])
@@ -132,8 +133,7 @@ def import_from_pkl(db_config, file_path, import_scope="all", source_name=None, 
         log(f"❌ [pkl2mysql] 오류 발생: {e}")
         raise e
     finally:
-        if engine:
-            engine.dispose()
+        dispose_mysql_engine(engine, logger=log, label="pkl2mysql")
 
 
 def _insert_ignore(table, conn, keys, data_iter):

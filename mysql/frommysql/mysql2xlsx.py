@@ -1,5 +1,6 @@
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import text
+from mysql.services.engine_factory import create_mysql_engine, dispose_mysql_engine
 from mysql.services.query_safety import validate_read_only_query
 
 def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_path=None):
@@ -15,7 +16,7 @@ def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_pat
     """
     engine = None
     try:
-        engine = create_engine(db_url)
+        engine = create_mysql_engine(db_url)
         print(f"✅ [mysql2xlsx] 데이터베이스 연결 성공!")
         
         if export_scope == "query":
@@ -37,7 +38,6 @@ def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_pat
             # pd.read_sql 내부나 다른 라이브러리(pymysql/sqlalchemy) 연동 과정에서의 이슈일 가능성 높음.
             # 가장 확실한 해결책은 sqlalchemy의 text() 객체로 감싸는 것.
             
-            from sqlalchemy import text
             df = pd.read_sql(text(query), con=engine)
             print(f"✅ [mysql2xlsx] 쿼리 실행 완료: {df.shape[0]} rows, {df.shape[1]} columns")
             
@@ -105,5 +105,4 @@ def export_to_xlsx(db_url, export_scope, table_name=None, query=None, output_pat
         print(f"❌ [mysql2xlsx] 오류 발생: {e}")
         raise e
     finally:
-        if engine:
-            engine.dispose()
+        dispose_mysql_engine(engine, logger=print, label="mysql2xlsx")

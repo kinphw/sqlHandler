@@ -1,5 +1,6 @@
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from mysql.services.engine_factory import create_mysql_engine, dispose_mysql_engine
 from mysql.services.query_safety import validate_read_only_query
 
 def export_to_pkl(db_url, export_scope, table_name=None, query=None, output_path=None):
@@ -15,7 +16,7 @@ def export_to_pkl(db_url, export_scope, table_name=None, query=None, output_path
     """
     engine = None
     try:
-        engine = create_engine(db_url)
+        engine = create_mysql_engine(db_url)
         print(f"✅ [mysql2pkl] 데이터베이스 연결 성공!")
         
         if export_scope == "query":
@@ -81,5 +82,4 @@ def export_to_pkl(db_url, export_scope, table_name=None, query=None, output_path
         print(f"❌ [mysql2pkl] 오류 발생: {e}")
         raise e
     finally:
-        if engine:
-            engine.dispose()
+        dispose_mysql_engine(engine, logger=print, label="mysql2pkl")

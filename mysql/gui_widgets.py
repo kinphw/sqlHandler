@@ -16,6 +16,7 @@ class MySQLView:
         self._comparison_col_vars = []  # list of (col_name, BooleanVar)
         self._comparison_on_confirm = None
         self._comparison_on_refresh = None
+        self._trace_bindings = {}
         
         # Initialize persistent variables here so they don't get overwritten/garbage collected
         self._init_variables()
@@ -411,13 +412,28 @@ class MySQLView:
         # Collation related triggers
         elif key == 'target_table_change':
             if 'var_target_table' in self.widgets:
-                self.widgets['var_target_table'].trace_add('write', handler)
+                self._rebind_trace('target_table_change', self.widgets['var_target_table'], handler)
         elif key == 'collation_change':
             if 'var_collation' in self.widgets:
-                self.widgets['var_collation'].trace_add('write', handler)
+                self._rebind_trace('collation_change', self.widgets['var_collation'], handler)
         elif key == 'import_scope_change':
              if 'var_import_scope' in self.widgets:
-                self.widgets['var_import_scope'].trace_add('write', handler)
+                self._rebind_trace('import_scope_change', self.widgets['var_import_scope'], handler)
+
+    def _rebind_trace(self, key, variable, handler):
+        self._remove_trace_binding(key, variable)
+        trace_id = variable.trace_add('write', handler)
+        self._trace_bindings[key] = trace_id
+
+    def _remove_trace_binding(self, key, variable):
+        trace_id = self._trace_bindings.pop(key, None)
+        if not trace_id:
+            return
+
+        try:
+            variable.trace_remove('write', trace_id)
+        except tk.TclError:
+            pass
     
     def show_warning(self, title, message):
         messagebox.showwarning(title, message)
