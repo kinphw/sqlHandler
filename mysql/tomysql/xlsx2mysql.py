@@ -70,14 +70,23 @@ def import_from_xlsx(db_url, file_path, import_scope="all", source_name=None, ta
                     df = df.drop(columns=cols_to_drop)
                     log(f"  ⏭️ 제외된 컬럼: {', '.join(cols_to_drop)}")
 
-            # Replace + existing table + excluded columns → TRUNCATE + append to preserve schema
+            # Replace + existing table + excluded columns → transactional delete + append
             effective_if_exists = if_exists
-            if if_exists == "replace" and table_existed and cols_to_drop:
-                _truncate_table(engine, target_table, log)
+            preserve_existing_schema = bool(if_exists == "replace" and table_existed and cols_to_drop)
+            if preserve_existing_schema:
                 effective_if_exists = "append"
 
             # Import single table
-            _import_single_table(df, target_table, engine, effective_if_exists, desired_collation, table_existed, log)
+            _import_single_table(
+                df,
+                target_table,
+                engine,
+                effective_if_exists,
+                desired_collation,
+                table_existed,
+                log,
+                preserve_existing_schema=preserve_existing_schema,
+            )
             log(f"🎉 [xlsx2mysql] 테이블 '{target_table}' Import 완료!")
 
         else:
@@ -109,13 +118,22 @@ def import_from_xlsx(db_url, file_path, import_scope="all", source_name=None, ta
                         if mismatch and stop_on_mismatch:
                             raise ValueError(f"콜레이션 불일치로 중단: 테이블 '{table_name}'")
 
-                # Replace + existing table + excluded columns → TRUNCATE + append to preserve schema
+                # Replace + existing table + excluded columns → transactional delete + append
                 effective_if_exists = if_exists
-                if if_exists == "replace" and table_existed and cols_to_drop:
-                    _truncate_table(engine, table_name, log)
+                preserve_existing_schema = bool(if_exists == "replace" and table_existed and cols_to_drop)
+                if preserve_existing_schema:
                     effective_if_exists = "append"
 
-                _import_single_table(df, table_name, engine, effective_if_exists, desired_collation, table_existed, log)
+                _import_single_table(
+                    df,
+                    table_name,
+                    engine,
+                    effective_if_exists,
+                    desired_collation,
+                    table_existed,
+                    log,
+                    preserve_existing_schema=preserve_existing_schema,
+                )
 
             log(f"\n🎉 [xlsx2mysql] 총 {len(sheets)}개 테이블 Import 완료!")
 
@@ -138,15 +156,26 @@ def _insert_ignore(table, conn, keys, data_iter):
     conn.execute(stmt)
 
 
-def _import_single_table(df, table_name, engine, if_exists, desired_collation, table_existed, log=print):
+def _import_single_table(
+    df,
+    table_name,
+    engine,
+    if_exists,
+    desired_collation,
+    table_existed,
+    log=print,
+    preserve_existing_schema=False,
+):
     """Import a single DataFrame to MySQL table."""
     # _x000D_ 처리 (Excel 특수 문자)
     for col in df.select_dtypes(include=['object']).columns:
         df[col] = df[col].str.replace('_x000D_', '', regex=False)
 
-    mode_text = "대체" if if_exists == "replace" else "추가"
+    requested_mode_text = "대체" if (if_exists == "replace" or preserve_existing_schema) else "추가"
 
-    if if_exists == "replace":
+    if preserve_existing_schema:
+        log(f"  ♻️ 기존 테이블 '{table_name}' 구조를 유지한 채 데이터를 교체")
+    elif if_exists == "replace":
         if table_existed:
             log(f"  🗑️ 기존 테이블 '{table_name}' 삭제 후 재생성")
         else:
@@ -157,7 +186,12 @@ def _import_single_table(df, table_name, engine, if_exists, desired_collation, t
         else:
             log(f"  ℹ️ 테이블 '{table_name}' 신규 생성 후 데이터 삽입")
 
-    log(f"  ▶ Import 중 ({mode_text} 모드)...")
+    log(f"  ▶ Import 중 ({requested_mode_text} 모드)...")
+
+    if preserve_existing_schema:
+        _replace_existing_rows_in_transaction(df, table_name, engine, desired_collation, log)
+        return
+
     method = _insert_ignore if (if_exists == "append" and table_existed) else "multi"
     df.to_sql(name=table_name, con=engine, index=False, if_exists=if_exists, method=method)
     _apply_table_collation(engine, table_name, desired_collation, table_existed, if_exists, log)
@@ -194,12 +228,20 @@ def _get_db_name_from_url(db_url):
         return None
 
 
-def _truncate_table(engine, table_name, log=print):
-    """TRUNCATE table to clear data while preserving schema."""
+def _delete_all_rows(conn, table_name):
     safe_table = _escape_identifier(table_name)
+    conn.execute(text(f"DELETE FROM `{safe_table}`"))
+
+
+def _replace_existing_rows_in_transaction(df, table_name, engine, desired_collation, log=print):
+    """Replace table data while keeping schema and allowing rollback on failure."""
+    method = _insert_ignore
     with engine.begin() as conn:
-        conn.execute(text(f"TRUNCATE TABLE `{safe_table}`"))
-    log(f"  🗑️ 기존 테이블 '{table_name}' 데이터 초기화 (스키마 보존)")
+        _delete_all_rows(conn, table_name)
+        log(f"  🗑️ 기존 테이블 '{table_name}' 데이터 삭제 (트랜잭션 적용)")
+        df.to_sql(name=table_name, con=conn, index=False, if_exists="append", method=method)
+        _apply_table_collation(conn, table_name, desired_collation, True, "append", log)
+    log(f"  ✅ {len(df)} rows Import 완료")
 
 
 def _escape_identifier(name):
@@ -256,7 +298,7 @@ def _report_collation_mismatch(engine, db_name, table_name, desired_collation, s
     return has_mismatch
 
 
-def _apply_table_collation(engine, table_name, desired_collation, table_existed, if_exists, log=print):
+def _apply_table_collation(connectable, table_name, desired_collation, table_existed, if_exists, log=print):
     if not desired_collation:
         return
 
@@ -266,8 +308,11 @@ def _apply_table_collation(engine, table_name, desired_collation, table_existed,
 
     safe_table = _escape_identifier(table_name)
     alter_sql = f"ALTER TABLE `{safe_table}` CONVERT TO CHARACTER SET utf8mb4 COLLATE {desired_collation}"
-    with engine.begin() as conn:
-        conn.execute(text(alter_sql))
+    if hasattr(connectable, "execute"):
+        connectable.execute(text(alter_sql))
+    else:
+        with connectable.begin() as conn:
+            conn.execute(text(alter_sql))
     log(f"  ✅ 콜레이션 적용 완료: {desired_collation}")
 
 
