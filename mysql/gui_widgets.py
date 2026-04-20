@@ -4,9 +4,9 @@ import os
 
 class MySQLView:
     def __init__(self, notebook, app_instance):
-        self.app_instance = app_instance 
+        self.app_instance = app_instance
         self.tab = tk.Frame(notebook)
-        
+
         self.widgets = {}
         self.paned_window = None
         self.right_panel = None
@@ -17,15 +17,14 @@ class MySQLView:
         self._comparison_on_confirm = None
         self._comparison_on_refresh = None
         self._trace_bindings = {}
-        
+
         # Initialize persistent variables here so they don't get overwritten/garbage collected
         self._init_variables()
-        
+
         self._setup_ui()
 
     def _init_variables(self):
         # Persistent variables that need to keep their state/bindings across UI updates
-        self.widgets['var_prod'] = tk.BooleanVar(value=False)
         self.widgets['var_mode'] = tk.StringVar(value="mysql2xlsx")
 
         # Export vars
@@ -51,20 +50,14 @@ class MySQLView:
         # Right Panel (Query Input) - Initially hidden
         self.right_panel = tk.Frame(self.paned_window)
         
-        # --- DB Connection Section (Left Panel) ---
-        lb_db_frame = tk.LabelFrame(left_panel, text="DB Connection Settings", padx=10, pady=10)
-        lb_db_frame.pack(fill="x", padx=10, pady=5)
-
-        tk.Label(lb_db_frame, text="DB Name:").grid(row=0, column=0, sticky="e")
-        self.widgets['entry_db_name'] = tk.Entry(lb_db_frame)
-        self.widgets['entry_db_name'].insert(0, os.getenv("MYSQL_DB", ""))
-        self.widgets['entry_db_name'].grid(row=0, column=1, sticky="w", padx=5)
-
-        self.widgets['chk_prod'] = tk.Checkbutton(lb_db_frame, text="Use Prod DB", variable=self.widgets['var_prod'])
-        self.widgets['chk_prod'].grid(row=1, column=0, columnspan=2, sticky="w")
-        
-        self.widgets['lbl_db_info'] = tk.Label(lb_db_frame, text="", fg="gray")
-        self.widgets['lbl_db_info'].grid(row=2, column=0, columnspan=2, sticky="w")
+        # --- DB Connection Status (read-only, managed by Connection tab) ---
+        conn_bar = tk.Frame(left_panel)
+        conn_bar.pack(fill="x", padx=10, pady=(8, 2))
+        self.widgets['lbl_db_info'] = tk.Label(
+            conn_bar, text="연결 없음 — 'DB 연결' 탭에서 연결하세요",
+            fg="gray", font=("Arial", 8)
+        )
+        self.widgets['lbl_db_info'].pack(anchor="w")
 
         # --- Mode Selection Section (Left Panel) ---
         lb_mode_frame = tk.LabelFrame(left_panel, text="Select Mode", padx=10, pady=10)
@@ -313,12 +306,6 @@ class MySQLView:
     def set_db_info_label(self, connection_str):
         self.widgets['lbl_db_info'].config(text=connection_str)
 
-    def get_db_name(self):
-        return self.widgets['entry_db_name'].get().strip()
-
-    def get_prod_checked(self):
-        return self.widgets['var_prod'].get()
-
     def get_mode(self):
         return self.widgets['var_mode'].get()
 
@@ -404,8 +391,6 @@ class MySQLView:
             if 'btn_run' in self.widgets: self.widgets['btn_run'].config(command=handler)
         elif key == 'release_button':
             if 'btn_release' in self.widgets: self.widgets['btn_release'].config(command=handler)
-        elif key == 'db_prod_change':
-            if 'chk_prod' in self.widgets: self.widgets['chk_prod'].config(command=handler)
         elif key == 'mode_change':
              self.widgets['var_mode'].trace_add('write', handler)
         

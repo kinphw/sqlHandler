@@ -6,37 +6,38 @@ from mysql.frommysql.mysql2xlsx import export_to_xlsx
 from mysql.frommysql.mysql2pkl import export_to_pkl
 from mysql.tomysql.xlsx2mysql import import_from_xlsx as mysql_import_xlsx
 from mysql.tomysql.pkl2mysql import import_from_pkl as mysql_import_pkl
-from mysql.services.db_connection import get_db_url_and_config
 from mysql.services.collation_service import fetch_server_collations, fetch_table_collation_info
 from mysql.services.column_service import fetch_table_columns
 from mysql.services.query_safety import validate_read_only_query
 
+
 class MySQLController:
-    def __init__(self, view):
+    def __init__(self, view, connection_manager):
         self.view = view
+        self._conn_mgr = connection_manager
         self._db_default_collation = None
         self._collation_update_job = None
-        self.tunnel = None
         self._cached_source_columns = {}  # {source_name: [col1, col2, ...]}
         self._import_context = None  # stores state during comparison wizard
-        
+
         # Bind Events
         self.view.bind_event('run_button', self.run_process)
         self.view.bind_event('release_button', self.release_all)
-        self.view.bind_event('db_prod_change', self.update_db_info)
         self.view.bind_event('mode_change', self.on_mode_change)
-        
+
         # Initial Setup
         self.update_db_info()
         # Initialize UI widgets first so variables are bound
         self.update_ui()
 
     def update_db_info(self, *args):
-        prefix = "PROD_" if self.view.get_prod_checked() else ""
-        host = os.getenv(f"{prefix}MYSQL_HOST")
-        port = os.getenv(f"{prefix}MYSQL_PORT")
-        user = os.getenv(f"{prefix}MYSQL_USER")
-        self.view.set_db_info_label(f"Connecting to: {user}@{host}:{port}")
+        if self._conn_mgr.is_connected():
+            m = self._conn_mgr
+            self.view.set_db_info_label(
+                f"연결됨: {m.user}@{m._eff_host}:{m._eff_port}/{m.db_name}"
+            )
+        else:
+            self.view.set_db_info_label("연결 없음 — 'DB 연결' 탭에서 연결하세요")
 
     def on_mode_change(self, *args):
         self.update_ui()
@@ -59,29 +60,20 @@ class MySQLController:
             self.schedule_collation_status_update()
 
     def _get_db_url_and_config(self, silent=False):
-        db_name = self.view.get_db_name()
-        on_error = self.view.show_error if not silent else None
-        
-        db_url, config, tunnel = get_db_url_and_config(
-            db_name,
-            self.view.get_prod_checked(),
-            env_getter=os.getenv,
-            silent=silent,
-            on_error=on_error,
-        )
-        if tunnel:
-            self.tunnel = tunnel
-        return db_url, config
+        if not self._conn_mgr.is_connected():
+            if not silent:
+                self.view.show_error(
+                    "연결 오류",
+                    "DB에 연결되어 있지 않습니다.\n'DB 연결' 탭에서 먼저 연결하세요."
+                )
+            return None, None
+        return self._conn_mgr.get_db_url(), self._conn_mgr.get_config()
 
     def _close_tunnel(self):
-        if self.tunnel:
-            self.tunnel.stop()
-            self.tunnel = None
-            print("🔒 SSH Tunnel Closed.")
+        pass  # Tunnel is managed by ConnectionManager — do not close here
 
     def release_all(self):
-        """모든 파일 핸들, DB 연결, 캐시를 해제"""
-        self._close_tunnel()
+        """파일 핸들·캐시·비교 패널 해제 (DB 연결은 ConnectionManager가 관리)"""
         self._cached_source_columns = {}
         self._import_context = None
         self.view.hide_comparison_panel()
@@ -89,7 +81,7 @@ class MySQLController:
         import gc
         gc.collect()
 
-        self.view.log("[Release] 모든 리소스가 해제되었습니다.")
+        self.view.log("[Release] 캐시가 해제되었습니다.")
 
     @staticmethod
     def _normalize_columns(columns):
@@ -300,7 +292,7 @@ class MySQLController:
                 elif table_name:
                     default_name = table_name + ext
                 else:
-                    default_name = self.view.get_db_name() + "_full" + ext
+                    default_name = self._conn_mgr.db_name + "_full" + ext
 
                 from tkinter import filedialog
                 save_path = filedialog.asksaveasfilename(
@@ -566,7 +558,7 @@ class MySQLController:
         if not ctx:
             return
 
-        if self.view.get_prod_checked():
+        if self._conn_mgr.is_prod:
             if not self.view.show_confirm(
                 "운영환경 Import 확인",
                 "운영환경에 대한 Import입니다. 정말 진행하시겠습니까?"
