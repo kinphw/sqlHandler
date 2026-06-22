@@ -57,8 +57,11 @@ def import_from_xlsx(db_url, file_path, import_scope="all", source_name=None, ta
                 _report_existing_table_collation(engine, db_name, target_table, log)
                 if desired_collation:
                     mismatch = _report_collation_mismatch(engine, db_name, target_table, desired_collation, schema_collation, log)
-                    if mismatch and stop_on_mismatch:
-                        raise ValueError(f"콜레이션 불일치로 중단: 테이블 '{target_table}'")
+                    if mismatch:
+                        if if_exists == "append":
+                            log("  ℹ️ Append 모드: 기존 테이블 콜레이션을 유지하며 데이터만 추가 (불일치는 참고용)")
+                        elif stop_on_mismatch:
+                            raise ValueError(f"콜레이션 불일치로 중단: 테이블 '{target_table}'")
             elif not table_existed:
                 log(f"  ℹ️ 대상 테이블 '{target_table}' 미존재: 신규 생성 예정")
 
@@ -116,8 +119,11 @@ def import_from_xlsx(db_url, file_path, import_scope="all", source_name=None, ta
                     _report_existing_table_collation(engine, db_name, table_name, log)
                     if desired_collation:
                         mismatch = _report_collation_mismatch(engine, db_name, table_name, desired_collation, schema_collation, log)
-                        if mismatch and stop_on_mismatch:
-                            raise ValueError(f"콜레이션 불일치로 중단: 테이블 '{table_name}'")
+                        if mismatch:
+                            if if_exists == "append":
+                                log("  ℹ️ Append 모드: 기존 테이블 콜레이션을 유지하며 데이터만 추가 (불일치는 참고용)")
+                            elif stop_on_mismatch:
+                                raise ValueError(f"콜레이션 불일치로 중단: 테이블 '{table_name}'")
 
                 # Replace + existing table + excluded columns → transactional delete + append
                 effective_if_exists = if_exists

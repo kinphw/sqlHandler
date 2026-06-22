@@ -14,6 +14,7 @@ class MySQLView:
         self.comparison_panel = None
         self.is_comparison_panel_visible = False
         self._comparison_col_vars = []  # list of (col_name, BooleanVar)
+        self._comparison_validation_vars = []  # list of (col_name, BooleanVar) - Test 검증 키
         self._comparison_on_confirm = None
         self._comparison_on_refresh = None
         self._trace_bindings = {}
@@ -90,6 +91,9 @@ class MySQLView:
 
         self.widgets['btn_run'] = tk.Button(btn_frame, text="RUN", height=2, bg="#dddddd")
         self.widgets['btn_run'].pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        self.widgets['btn_test'] = tk.Button(btn_frame, text="Test (사전 체크)", height=2, bg="#dde7ff")
+        self.widgets['btn_test'].pack(side="left", fill="x", expand=True, padx=5)
 
         self.widgets['btn_release'] = tk.Button(btn_frame, text="Release", height=2, bg="#ffcccc")
         self.widgets['btn_release'].pack(side="left", fill="x", expand=True, padx=(5, 0))
@@ -345,7 +349,8 @@ class MySQLView:
         return {
             'import_scope': self.widgets['var_import_scope'].get(),
             'target_table': self.widgets['var_target_table'].get().strip(),
-            'collation': self.widgets['var_collation'].get() or "server_default"
+            'collation': self.widgets['var_collation'].get() or "server_default",
+            'if_exists': self.widgets['var_import_mode'].get(),
         }
 
     def set_on_file_selected(self, callback):
@@ -389,6 +394,8 @@ class MySQLView:
         # Helper to bind events or commands to specific widgets
         if key == 'run_button':
             if 'btn_run' in self.widgets: self.widgets['btn_run'].config(command=handler)
+        elif key == 'test_button':
+            if 'btn_test' in self.widgets: self.widgets['btn_test'].config(command=handler)
         elif key == 'release_button':
             if 'btn_release' in self.widgets: self.widgets['btn_release'].config(command=handler)
         elif key == 'mode_change':
@@ -404,6 +411,9 @@ class MySQLView:
         elif key == 'import_scope_change':
              if 'var_import_scope' in self.widgets:
                 self._rebind_trace('import_scope_change', self.widgets['var_import_scope'], handler)
+        elif key == 'import_mode_change':
+             if 'var_import_mode' in self.widgets:
+                self._rebind_trace('import_mode_change', self.widgets['var_import_mode'], handler)
 
     def _rebind_trace(self, key, variable, handler):
         self._remove_trace_binding(key, variable)
@@ -458,6 +468,7 @@ class MySQLView:
         for widget in self.comparison_panel.winfo_children():
             widget.destroy()
         self._comparison_col_vars = []
+        self._comparison_validation_vars = []
 
         # Build MySQL column lookup
         mysql_col_map = {}  # {col_name: (data_type, col_key, extra)}
@@ -533,8 +544,8 @@ class MySQLView:
                     tk.Label(frame_row, text="(auto_increment)", fg="gray",
                              font=("", 8)).pack(side="left")
 
-        # --- Right: MySQL Table Columns ---
-        right_label_text = "MySQL 테이블 컬럼" if mysql_columns else "MySQL 테이블 (신규 생성 예정)"
+        # --- Right: MySQL Table Columns (체크 = Test 미리보기 검증 키) ---
+        right_label_text = "MySQL 테이블 컬럼 (체크 = 검증 키)" if mysql_columns else "MySQL 테이블 (신규 생성 예정)"
         right_label = tk.LabelFrame(body, text=right_label_text, padx=5, pady=5)
         right_label.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=5)
 
@@ -551,10 +562,8 @@ class MySQLView:
 
         if mysql_columns:
             for col_name, data_type, col_key, extra in mysql_columns:
-                if col_name in df_col_set:
-                    fg_color = "#006400"  # green - matched
-                else:
-                    fg_color = "#999999"  # gray - MySQL only
+                matched = col_name in df_col_set
+                fg_color = "#006400" if matched else "#999999"  # green=matched, gray=MySQL only
 
                 label_text = f"{col_name} ({data_type})"
                 badges = []
@@ -565,9 +574,19 @@ class MySQLView:
                 if badges:
                     label_text += f" [{','.join(badges)}]"
 
-                tk.Label(right_inner, text=label_text, fg=fg_color, anchor="w").pack(anchor="w")
+                is_auto = 'auto_increment' in (extra or '').lower()
+                if matched and not is_auto:
+                    # 파일에 있고 auto_increment가 아닌 컬럼만 검증 키 후보 (복수 선택)
+                    var = tk.BooleanVar(value=False)
+                    self._comparison_validation_vars.append((col_name, var))
+                    tk.Checkbutton(right_inner, text=label_text, fg=fg_color,
+                                   activeforeground=fg_color, variable=var,
+                                   anchor="w").pack(anchor="w", fill="x")
+                else:
+                    # 파일에 없거나 auto_increment인 컬럼은 검증 키로 부적절 → 라벨만
+                    tk.Label(right_inner, text=label_text, fg=fg_color, anchor="w").pack(anchor="w")
         else:
-            tk.Label(right_inner, text="테이블이 아직 존재하지 않습니다.\n컬럼 제외만 선택할 수 있습니다.",
+            tk.Label(right_inner, text="테이블이 아직 존재하지 않습니다.\n검증 키는 기존 테이블에서만 선택할 수 있습니다.",
                      fg="gray", justify="left").pack(anchor="w", pady=10)
 
         # --- Mismatch summary ---
@@ -591,6 +610,11 @@ class MySQLView:
             summary_text = "모든 컬럼 일치"
 
         tk.Label(lb_frame, text=summary_text, fg=summary_color, font=("", 9, "bold")).pack(anchor="w", pady=(5, 0))
+
+        if mysql_columns:
+            tk.Label(lb_frame,
+                     text="* 우측에서 체크한 컬럼들의 값 조합으로 Test 미리보기에서 기적재(중복) 여부를 검증합니다.",
+                     fg="#555", font=("", 8), justify="left").pack(anchor="w", pady=(2, 0))
 
         # --- Buttons ---
         btn_frame = tk.Frame(lb_frame)
@@ -630,3 +654,7 @@ class MySQLView:
     def get_excluded_columns(self):
         """Return list of column names where the checkbox is unchecked."""
         return [col_name for col_name, var in self._comparison_col_vars if not var.get()]
+
+    def get_validation_key_columns(self):
+        """Test 미리보기 검증 키로 체크된 MySQL 컬럼명 리스트 (복수 가능)."""
+        return [col_name for col_name, var in self._comparison_validation_vars if var.get()]

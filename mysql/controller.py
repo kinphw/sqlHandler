@@ -9,6 +9,19 @@ from mysql.tomysql.pkl2mysql import import_from_pkl as mysql_import_pkl
 from mysql.services.collation_service import fetch_server_collations, fetch_table_collation_info
 from mysql.services.column_service import fetch_table_columns
 from mysql.services.query_safety import validate_read_only_query
+from mysql.services.data_stats_service import (
+    fetch_table_row_count,
+    fetch_all_table_row_counts,
+    fetch_query_row_count,
+    fetch_key_columns,
+    count_existing_keys,
+    fetch_table_sample,
+    fetch_query_sample,
+    fetch_existing_key_set,
+)
+from mysql.preview import open_data_preview
+
+PREVIEW_ROW_LIMIT = 500  # 미리보기 창에 표시할 최대 행 수
 
 
 class MySQLController:
@@ -19,9 +32,11 @@ class MySQLController:
         self._collation_update_job = None
         self._cached_source_columns = {}  # {source_name: [col1, col2, ...]}
         self._import_context = None  # stores state during comparison wizard
+        self._validation_keys = {}  # {target_table: [key columns]} - Test 미리보기 검증 키
 
         # Bind Events
         self.view.bind_event('run_button', self.run_process)
+        self.view.bind_event('test_button', self.run_test)
         self.view.bind_event('release_button', self.release_all)
         self.view.bind_event('mode_change', self.on_mode_change)
 
@@ -76,6 +91,7 @@ class MySQLController:
         """파일 핸들·캐시·비교 패널 해제 (DB 연결은 ConnectionManager가 관리)"""
         self._cached_source_columns = {}
         self._import_context = None
+        self._validation_keys = {}
         self.view.hide_comparison_panel()
 
         import gc
@@ -174,6 +190,7 @@ class MySQLController:
         self.view.bind_event('target_table_change', _on_change)
         self.view.bind_event('collation_change', _on_change)
         self.view.bind_event('import_scope_change', _on_change)
+        self.view.bind_event('import_mode_change', _on_change)
 
     def schedule_collation_status_update(self):
         if self._collation_update_job:
@@ -218,12 +235,17 @@ class MySQLController:
             finally:
                 self._close_tunnel()
 
+            is_append = params.get('if_exists') == "append"
             if table_collation:
                 table_coll_text = f"{table_collation}"
                 if selected_effective:
                     if table_collation == selected_effective:
                         compare_text = f"일치 (선택: {selected_text})"
                         compare_color = "green"
+                    elif is_append:
+                        # Append는 기존 콜레이션을 유지하므로 불일치는 참고용
+                        compare_text = f"Append: 기존 콜레이션 유지 (선택 {selected_text}는 참고용)"
+                        compare_color = "#CC6600"
                     else:
                         compare_text = f"불일치 (선택: {selected_text})"
                         compare_color = "red"
@@ -278,6 +300,11 @@ class MySQLController:
                         self.view.show_warning("Warning", "Enter a query.")
                         return
                     validate_read_only_query(query)
+
+                # --- 사전 행 수 체크 (execute 전) ---
+                if not self._export_precheck_confirm(db_config, export_scope, table_name, query):
+                    self.view.log("[Export] 사전 체크 단계에서 중단되었습니다.")
+                    return
 
                 if mode == "mysql2xlsx":
                     ext = ".xlsx"
@@ -357,6 +384,490 @@ class MySQLController:
             self.view.show_error("Error", f"An error occurred:\n{str(e)}")
         finally:
             self._close_tunnel()
+
+    # --- Pre-check Flow (execute 전 사전 점검 / Test 버튼 공용) ---
+
+    def _collect_export_precheck(self, db_config, export_scope, table_name, query):
+        """대상 행 수를 조회해 (body, warn)를 반환한다.
+        warn이 있으면 진행 불가(대상 없음 등), body는 표시용 본문."""
+        if export_scope == "table":
+            count = fetch_table_row_count(db_config, table_name)
+            if count is None:
+                return None, f"테이블 '{table_name}'을(를) 찾을 수 없습니다."
+            self.view.log(f"[사전 체크] 테이블 '{table_name}': {count:,} rows")
+            return f"테이블 '{table_name}'\n추출 대상: {count:,} rows", None
+
+        if export_scope == "database":
+            counts = fetch_all_table_row_counts(db_config)
+            if not counts:
+                return None, "데이터베이스에 테이블이 없습니다."
+            total = sum(c for _, c in counts if c >= 0)
+            lines = [
+                f"  - {t}: {c:,} rows" if c >= 0 else f"  - {t}: (조회 실패)"
+                for t, c in counts
+            ]
+            self.view.log(f"[사전 체크] 전체 DB: {len(counts)}개 테이블, 총 {total:,} rows")
+            for ln in lines:
+                self.view.log(ln)
+            preview = "\n".join(lines[:20])
+            if len(lines) > 20:
+                preview += f"\n  ... 외 {len(lines) - 20}개 테이블 (전체는 로그 참조)"
+            return f"전체 데이터베이스: {len(counts)}개 테이블, 총 {total:,} rows\n\n{preview}", None
+
+        if export_scope == "query":
+            count = fetch_query_row_count(db_config, query)
+            if count is None:
+                self.view.log("[사전 체크] 쿼리 결과 행 수를 미리 확인할 수 없습니다.")
+                return "쿼리 결과 행 수를 미리 확인할 수 없습니다.", None
+            self.view.log(f"[사전 체크] 쿼리 결과: {count:,} rows")
+            return f"쿼리 결과 추출 대상: {count:,} rows", None
+
+        return "", None
+
+    def _open_export_preview(self, db_config, export_scope, table_name, query):
+        """Export 대상 데이터를 별도 미리보기 창으로 띄운다 (table / query 스코프)."""
+        root = self.view.tab.winfo_toplevel()
+        if export_scope == "table":
+            total = fetch_table_row_count(db_config, table_name)
+            if total is None:
+                self.view.show_warning("미리보기", f"테이블 '{table_name}'을(를) 찾을 수 없습니다.")
+                return
+            sample = fetch_table_sample(db_config, table_name, PREVIEW_ROW_LIMIT)
+            if sample is None:
+                self.view.show_warning("미리보기", "데이터를 불러오지 못했습니다.")
+                return
+            columns, rows = sample
+            self.view.log(f"[미리보기] 테이블 '{table_name}': 전체 {total:,} rows, 상위 {len(rows):,} rows 표시")
+            tbl = {
+                'name': table_name,
+                'columns': columns,
+                'rows': rows,
+                'total_rows': total,
+                'status_per_row': None,
+                'summary': self._sample_summary(total, len(rows)),
+            }
+            open_data_preview(root, f"Export 미리보기 — {table_name}", [tbl])
+
+        elif export_scope == "query":
+            total = fetch_query_row_count(db_config, query)
+            sample = fetch_query_sample(db_config, query, PREVIEW_ROW_LIMIT)
+            if sample is None:
+                self.view.show_warning("미리보기", "쿼리 결과를 불러오지 못했습니다.")
+                return
+            columns, rows = sample
+            shown = len(rows)
+            if total is not None:
+                self.view.log(f"[미리보기] 쿼리 결과: 전체 {total:,} rows, 상위 {shown:,} rows 표시")
+                summary = self._sample_summary(total, shown)
+            else:
+                self.view.log(f"[미리보기] 쿼리 결과: 상위 {shown:,} rows 표시 (전체 행수 확인 불가)")
+                summary = f"전체 행수 확인 불가 / 미리보기 상위 {shown:,} rows"
+            tbl = {
+                'name': 'query_result',
+                'columns': columns,
+                'rows': rows,
+                'total_rows': total if total is not None else shown,
+                'status_per_row': None,
+                'summary': summary,
+            }
+            open_data_preview(root, "Export 미리보기 — 쿼리 결과", [tbl])
+
+    @staticmethod
+    def _sample_summary(total, shown):
+        if shown < total:
+            return f"전체 {total:,} rows / 미리보기 상위 {shown:,} rows"
+        return f"전체 {total:,} rows (전부 표시)"
+
+    def _collect_validation_keys(self):
+        """비교 패널 우측에서 현재 표시 테이블의 검증 키 선택을 읽어 누적 저장한다.
+        반환: {target_table: [key columns]} (Test 미리보기 전용)."""
+        if self.view.is_comparison_panel_visible and self._import_context:
+            comps = self._import_context.get('comparisons') or []
+            cidx = self._import_context.get('current_index', 0)
+            if 0 <= cidx < len(comps):
+                cur_table = comps[cidx]['target_table']
+                selected = self.view.get_validation_key_columns()
+                if selected:
+                    self._validation_keys[cur_table] = selected
+        return dict(self._validation_keys)
+
+    def _build_import_preview_tables(self, ctx, stats, validation_keys=None):
+        """Import 대상 파일을 읽어 테이블별 미리보기 데이터(+행별 기적재 검증)를 만든다.
+        validation_keys: {target_table: [사용자가 선택한 검증 키 컬럼]}."""
+        validation_keys = validation_keys or {}
+        params = ctx['params']
+        mode = ctx['mode']
+        db_config = ctx['db_config']
+
+        tables_data = self._load_source_tables(
+            mode, params['file_path'], params['import_scope'], params['source_name'], ctx
+        )
+        stats_by_table = {s['table']: s for s in stats}
+
+        result = []
+        for comp in ctx['comparisons']:
+            target = comp['target_table']
+            df = tables_data.get(target)
+            if df is None:
+                continue
+
+            total = len(df)
+            columns = [str(c) for c in df.columns]
+            norm_cols = [c.strip().replace(" ", "_").lower() for c in columns]
+            sample_df = df.head(PREVIEW_ROW_LIMIT)
+            rows = [tuple(r) for r in sample_df.itertuples(index=False, name=None)]
+
+            st = stats_by_table.get(target)
+            db_exists = bool(st and st.get('db_rows') is not None)
+            selected_keys = validation_keys.get(target)
+
+            status_per_row = None
+            if selected_keys and db_exists:
+                status_per_row = self._compute_row_status(db_config, target, selected_keys, norm_cols, rows)
+
+            result.append({
+                'name': target,
+                'columns': columns,
+                'rows': rows,
+                'total_rows': total,
+                'status_per_row': status_per_row,
+                'summary': self._import_sample_summary(st, total, len(rows), selected_keys, status_per_row),
+            })
+        return result
+
+    def _compute_row_status(self, db_config, target, key_columns, norm_cols, rows):
+        """선택한 검증 키(key_columns)로 표시 행마다 '기적재'/'신규'/'확인불가'를 매긴다.
+        키 컬럼이 파일에 없으면 None(검증 불가)."""
+        if not key_columns:
+            return None
+        norm_key = [k.strip().replace(" ", "_").lower() for k in key_columns]
+        if not all(k in norm_cols for k in norm_key):
+            return None
+
+        col_idx = {c: i for i, c in enumerate(norm_cols)}
+        key_pos = [col_idx[k] for k in norm_key]
+
+        row_keys = []  # 행별 키 튜플 또는 None(키에 NULL 포함 시)
+        for r in rows:
+            kt = []
+            null = False
+            for p in key_pos:
+                v = self._py_val(r[p])
+                if v is None:
+                    null = True
+                    break
+                kt.append(v)
+            row_keys.append(None if null else tuple(kt))
+
+        distinct = [k for k in row_keys if k is not None]
+        exist_set = fetch_existing_key_set(db_config, target, key_columns, distinct)
+
+        status = []
+        for k in row_keys:
+            if k is None:
+                status.append("확인불가")
+            elif k in exist_set:
+                status.append("기적재")
+            else:
+                status.append("신규")
+        return status
+
+    @staticmethod
+    def _py_val(v):
+        if pd.api.types.is_scalar(v) and pd.isna(v):
+            return None
+        return v.item() if hasattr(v, "item") else v
+
+    @staticmethod
+    def _import_sample_summary(st, total, shown, selected_keys=None, status_per_row=None):
+        base = (f"파일 전체 {total:,} rows / 미리보기 상위 {shown:,} rows"
+                if shown < total else f"파일 전체 {total:,} rows (전부 표시)")
+        if st and st.get('db_rows') is None:
+            return base + " / DB 신규 테이블 (기적재 없음)"
+        if st and st.get('db_rows') is not None:
+            base += f" / DB 기존 {st['db_rows']:,} rows"
+
+        if not selected_keys:
+            base += " / 검증 키 미선택 (비교 패널 우측에서 키 체크 후 Test)"
+        elif status_per_row is None:
+            base += f" / 선택 키({'+'.join(selected_keys)})가 파일에 없어 검증 불가"
+        else:
+            dup = sum(1 for s in status_per_row if s == "기적재")
+            base += f" / 검증 키: {'+'.join(selected_keys)} → (미리보기) 기적재 {dup:,}건"
+        return base
+
+    def _export_precheck_confirm(self, db_config, export_scope, table_name, query):
+        """Export 실행 전 대상 행 수를 조회하고 사용자 확인을 받는다.
+        진행하면 True, 중단(취소/대상없음)이면 False."""
+        try:
+            body, warn = self._collect_export_precheck(db_config, export_scope, table_name, query)
+        except Exception as e:
+            self.view.log(f"[사전 체크] 오류: {e}")
+            return self.view.show_confirm(
+                "Export 사전 체크",
+                f"사전 체크 중 오류가 발생했습니다:\n{e}\n\n그래도 계속하시겠습니까?"
+            )
+
+        if warn:
+            self.view.show_warning("사전 체크", warn)
+            return False
+        return self.view.show_confirm("Export 사전 체크", f"{body}\n\n계속하시겠습니까?")
+
+    def _format_import_stats(self, stats, if_exists):
+        """Import 사전 통계 리스트를 사람이 읽는 본문 문자열로 만든다 (로그도 함께 남김)."""
+        mode_text = "Replace(대체)" if if_exists == "replace" else "Append(추가)"
+        lines = []
+        total_dup = 0
+        for s in stats:
+            line = f"• {s['table']}: 파일 {s['file_rows']:,} rows"
+            if s['db_rows'] is None:
+                line += " / DB 신규 테이블"
+            else:
+                line += f" / DB 기존 {s['db_rows']:,} rows"
+                if not s['key_columns']:
+                    line += " / 키 없음(중복 판별 불가)"
+                elif s['dup_rows'] is None:
+                    line += " / 중복 확인 불가"
+                else:
+                    src = " · 선택 키" if s.get('key_source') == 'user' else ""
+                    line += f" / 중복(키 {'+'.join(s['key_columns'])}{src}) {s['dup_rows']:,}건"
+                    total_dup += s['dup_rows']
+            lines.append(line)
+            self.view.log(f"[사전 체크] {line}")
+
+        summary = "\n".join(lines)
+        note = ""
+        if if_exists == "append" and total_dup > 0:
+            note = f"\n\n⚠️ Append 모드: 중복 {total_dup:,}건은 INSERT IGNORE로 건너뜁니다."
+        elif if_exists == "replace":
+            note = "\n\n⚠️ Replace 모드: 기존 데이터를 삭제한 뒤 교체합니다."
+        return f"[{mode_text}] 대상 요약:\n\n{summary}{note}"
+
+    def run_test(self):
+        """Test 버튼: 실제 Export/Import를 실행하지 않고 사전 체크 결과만 보여준다."""
+        try:
+            db_url, db_config = self._get_db_url_and_config()
+            if not db_url:
+                return
+
+            mode = self.view.get_mode()
+            self.view.log(f"--- Test (사전 체크): {mode} ---")
+
+            if mode in ["mysql2xlsx", "mysql2pkl"]:
+                params = self.view.get_export_params()
+                if params is None:
+                    self.view.show_warning("Warning", "Check input fields.")
+                    return
+
+                export_scope = params.get('scope', 'table')
+                table_name = params['table_name']
+                query = None
+                if export_scope == 'query':
+                    query = self.view.get_query_text()
+                    if not query:
+                        self.view.show_warning("Warning", "Enter a query.")
+                        return
+                    validate_read_only_query(query)
+
+                if export_scope == "database":
+                    # 전체 DB는 테이블별 행 수 요약으로 (데이터 미리보기는 생략)
+                    body, warn = self._collect_export_precheck(db_config, export_scope, table_name, query)
+                    if warn:
+                        self.view.show_warning("Export 사전 체크 (Test)", warn)
+                    else:
+                        self.view.show_info("Export 사전 체크 (Test)", body)
+                else:
+                    # 특정 테이블 / 사용자 정의 쿼리 → 별도 미리보기 창
+                    self._open_export_preview(db_config, export_scope, table_name, query)
+
+            elif mode in ["xlsx2mysql", "pkl2mysql"]:
+                params = self.view.get_import_params()
+                if params is None:
+                    self.view.show_warning("Warning", "Select a file.")
+                    return
+                if params['import_scope'] == "single" and not params['target_table']:
+                    self.view.show_warning("Warning", "Target table name required.")
+                    return
+
+                comparisons = self._build_comparisons(db_config, params)
+                if not comparisons:
+                    self.view.show_warning("Test", "비교할 테이블이 없습니다. 파일을 먼저 선택하세요 (Browse).")
+                    return
+
+                # 검증 키(Test 전용): 비교 패널 우측에서 사용자가 체크한 컬럼
+                validation_keys = self._collect_validation_keys()
+
+                ctx = {
+                    'db_url': db_url,
+                    'db_config': db_config,
+                    'params': params,
+                    'mode': mode,
+                    'comparisons': comparisons,
+                    'current_index': 0,
+                    'excluded_columns': {},
+                }
+                stats = self._compute_import_stats(ctx)
+                preview_tables = self._build_import_preview_tables(ctx, stats, validation_keys)
+                if preview_tables:
+                    self._format_import_stats(stats, params['if_exists'])  # 로그 기록 (PK 기준 요약)
+                    open_data_preview(
+                        self.view.tab.winfo_toplevel(),
+                        "Import 미리보기 (기적재 검증 포함)",
+                        preview_tables,
+                    )
+                elif stats:
+                    self.view.show_info("Import 사전 체크 (Test)", self._format_import_stats(stats, params['if_exists']))
+                else:
+                    self.view.show_warning("Test", "표시할 내용이 없습니다. 파일/대상 설정을 확인하세요.")
+
+        except Exception as e:
+            self.view.log(f"Error: {str(e)}")
+            self.view.show_error("Error", f"An error occurred:\n{str(e)}")
+        finally:
+            self._close_tunnel()
+
+    def _import_precheck_confirm(self, ctx):
+        """Import 실행 전 파일 내용·DB 현황·중복을 요약하고 확인을 받는다.
+        진행하면 True, 취소면 False."""
+        # 비교 패널에서 사용자가 찍은 검증 키를 반영/저장 → 중복 판정에 재활용
+        self._collect_validation_keys()
+        try:
+            stats = self._compute_import_stats(ctx)
+        except Exception as e:
+            self.view.log(f"[사전 체크] 통계 산출 실패: {e}")
+            return self.view.show_confirm(
+                "Import 사전 체크",
+                f"사전 체크 중 오류가 발생했습니다:\n{e}\n\n그래도 계속하시겠습니까?"
+            )
+
+        if not stats:
+            return True  # 요약할 내용이 없으면 그대로 진행
+
+        body = self._format_import_stats(stats, ctx['params']['if_exists'])
+        return self.view.show_confirm("Import 사전 체크", f"{body}\n\n계속하시겠습니까?")
+
+    def _compute_import_stats(self, ctx):
+        """소스 파일을 읽어 비교 대상 테이블별 사전 통계를 산출한다.
+        반환: [{table, file_rows, db_rows, dup_rows, key_columns}]"""
+        params = ctx['params']
+        mode = ctx['mode']
+        db_config = ctx['db_config']
+
+        tables = self._load_source_tables(
+            mode, params['file_path'], params['import_scope'], params['source_name'], ctx
+        )
+
+        stats = []
+        for comp in ctx['comparisons']:
+            target = comp['target_table']
+            df = tables.get(target)
+            if df is None:
+                continue
+
+            file_rows = len(df)
+            norm_cols = [str(c).strip().replace(" ", "_").lower() for c in df.columns]
+
+            db_rows = fetch_table_row_count(db_config, target)
+            dup_rows = None
+            key_columns = []
+            key_source = None
+
+            if db_rows is not None:
+                # 1순위: Test에서 사용자가 찍은 검증 키(가장 정확) → 재활용
+                user_keys = self._validation_keys.get(target)
+                if user_keys:
+                    keys = list(user_keys)
+                    key_source = 'user'
+                else:
+                    # 2순위: PK/UNIQUE 자동 인식 (단, auto_increment 컬럼은 새 값 부여되므로 제외)
+                    keys = fetch_key_columns(db_config, target)
+                    auto_cols = {
+                        cn for cn, _dt, _ck, ex in (comp.get('mysql_columns') or [])
+                        if 'auto_increment' in (ex or '').lower()
+                    }
+                    keys = [k for k in keys if k not in auto_cols]
+                    key_source = 'auto' if keys else None
+
+                if keys:
+                    norm_key = [k.strip().replace(" ", "_").lower() for k in keys]
+                    if all(k in norm_cols for k in norm_key):
+                        key_columns = keys
+                        col_idx = {c: i for i, c in enumerate(norm_cols)}
+                        sub = df.iloc[:, [col_idx[k] for k in norm_key]]
+                        key_tuples = self._distinct_key_tuples(sub)
+                        dup_rows = (
+                            count_existing_keys(db_config, target, keys, key_tuples)
+                            if key_tuples else 0
+                        )
+                    else:
+                        # 키가 있으나 파일에 키 컬럼이 없음 → 확인 불가
+                        key_columns = keys
+                        dup_rows = None
+
+            stats.append({
+                'table': target,
+                'file_rows': file_rows,
+                'db_rows': db_rows,
+                'dup_rows': dup_rows,
+                'key_columns': key_columns,
+                'key_source': key_source,
+            })
+        return stats
+
+    def _load_source_tables(self, mode, file_path, import_scope, source_name, ctx):
+        """소스 파일을 {비교 대상 테이블명: DataFrame} 형태로 읽는다.
+        키는 _refresh_comparison_preview / _start_import_comparison 의 target 산출 규칙과 일치시킨다."""
+        result = {}
+        if mode == "pkl2mysql":
+            data = pd.read_pickle(file_path)
+            if import_scope == "single":
+                target = ctx['params']['target_table']
+                if isinstance(data, dict):
+                    if source_name and source_name in data:
+                        result[target] = data[source_name]
+                else:
+                    result[target] = data
+            else:
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, pd.DataFrame):
+                            result[str(k).strip().lower().replace(" ", "_")] = v
+                elif isinstance(data, pd.DataFrame):
+                    table_name = os.path.basename(file_path).split('.')[0]
+                    result[table_name.strip().lower().replace(" ", "_")] = data
+        else:  # xlsx2mysql
+            if import_scope == "single":
+                target = ctx['params']['target_table']
+                if source_name:
+                    result[target] = pd.read_excel(file_path, sheet_name=source_name)
+                else:
+                    result[target] = pd.read_excel(file_path, sheet_name=0)
+            else:
+                sheets = pd.read_excel(file_path, sheet_name=None)
+                for sheet_name, df in sheets.items():
+                    result[str(sheet_name).strip().lower().replace(" ", "_")] = df
+        return result
+
+    @staticmethod
+    def _distinct_key_tuples(sub_df):
+        """키 컬럼 DataFrame에서 NULL 없는 고유 키 튜플 목록(파이썬 native 값)을 만든다."""
+        seen = set()
+        result = []
+        for row in sub_df.itertuples(index=False, name=None):
+            conv = []
+            has_null = False
+            for v in row:
+                if pd.api.types.is_scalar(v) and pd.isna(v):
+                    has_null = True
+                    break
+                conv.append(v.item() if hasattr(v, "item") else v)
+            if has_null:
+                continue
+            t = tuple(conv)
+            if t not in seen:
+                seen.add(t)
+                result.append(t)
+        return result
 
     # --- Import Comparison Flow ---
 
@@ -445,46 +956,44 @@ class MySQLController:
             self.view.log(f"[DEBUG] Comparison preview error: {e}")
             self._close_tunnel()
 
+    def _build_comparisons(self, db_config, params):
+        """params + 캐시를 바탕으로 [{target_table, df_columns, mysql_columns}] 리스트를 만든다.
+        파일 미선택('all' 모드에서 캐시 없음) 시 빈 리스트를 반환한다."""
+        comparisons = []
+        if params['import_scope'] == "single":
+            target = params['target_table']
+            source_name = params['source_name']
+            df_columns = self._find_cached_columns(source_name, target, params['file_path'])
+            mysql_columns = fetch_table_columns(db_config, target)
+            self._close_tunnel()
+            comparisons.append({
+                'target_table': target,
+                'df_columns': df_columns,
+                'mysql_columns': mysql_columns,
+            })
+        else:
+            if not self._cached_source_columns:
+                return []
+            for source_name, df_cols in self._cached_source_columns.items():
+                target = source_name.strip().lower().replace(" ", "_")
+                mysql_columns = fetch_table_columns(db_config, target)
+                self._close_tunnel()
+                comparisons.append({
+                    'target_table': target,
+                    'df_columns': df_cols,
+                    'mysql_columns': mysql_columns,
+                })
+        return comparisons
+
     def _start_import_comparison(self, db_url, db_config, params, mode):
         """Build comparison data for all tables and start the wizard."""
         try:
-            comparisons = []
-
-            if params['import_scope'] == "single":
-                # Single table
-                target = params['target_table']
-                source_name = params['source_name']
-
-                # Find cached columns
-                df_columns = self._find_cached_columns(source_name, target, params['file_path'])
-
-                mysql_columns = fetch_table_columns(db_config, target)
-                self._close_tunnel()
-
-                comparisons.append({
-                    'target_table': target,
-                    'df_columns': df_columns,
-                    'mysql_columns': mysql_columns,
-                })
-            else:
-                # All tables - use cached source columns
-                if not self._cached_source_columns:
-                    self.view.show_warning("Warning", "파일을 먼저 선택해주세요 (Browse).")
-                    return
-
-                for source_name, df_cols in self._cached_source_columns.items():
-                    target = source_name.strip().lower().replace(" ", "_")
-                    mysql_columns = fetch_table_columns(db_config, target)
-                    self._close_tunnel()
-
-                    comparisons.append({
-                        'target_table': target,
-                        'df_columns': df_cols,
-                        'mysql_columns': mysql_columns,
-                    })
-
+            comparisons = self._build_comparisons(db_config, params)
             if not comparisons:
-                self.view.show_warning("Warning", "비교할 테이블이 없습니다.")
+                if params['import_scope'] != "single" and not self._cached_source_columns:
+                    self.view.show_warning("Warning", "파일을 먼저 선택해주세요 (Browse).")
+                else:
+                    self.view.show_warning("Warning", "비교할 테이블이 없습니다.")
                 return
 
             self._import_context = {
@@ -556,6 +1065,13 @@ class MySQLController:
         """Run the actual import with excluded columns applied."""
         ctx = self._import_context
         if not ctx:
+            return
+
+        # --- 사전 체크 (execute 전): 파일 내용·DB 현황·중복 요약 ---
+        if not self._import_precheck_confirm(ctx):
+            self.view.log("[Import] 사전 체크 단계에서 중단되었습니다.")
+            if self._cached_source_columns:
+                self._refresh_comparison_preview()
             return
 
         if self._conn_mgr.is_prod:

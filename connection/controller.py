@@ -77,6 +77,8 @@ class ConnectionController:
             else:
                 self._view.set_status("✕ 연결 실패", "red")
                 self._view.log("[연결 실패]")
+            # Notify other tabs (MySQL Handler 등) of the new connection state
+            self._conn_mgr.notify_listeners()
 
         self._view.schedule(_update)
 
@@ -87,3 +89,4 @@ class ConnectionController:
         self._conn_mgr.release()
         self._view.set_status("연결 없음", "gray")
         self._view.log("[연결 해제] 엔진 및 터널 해제 완료")
+        self._conn_mgr.notify_listeners()

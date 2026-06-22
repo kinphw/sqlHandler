@@ -46,6 +46,15 @@ class DataHandlerApp:
         self.cleaner_controller = CleanerController(self.cleaner_view, self.conn_mgr)
         self.notebook.add(self.cleaner_view.get_tab_frame(), text="Table Cleaner")
 
+        # --- Keep MySQL Handler's connection label in sync ---
+        # (1) push updates when the connection state changes (connect/release)
+        self.conn_mgr.add_listener(self.mysql_controller.update_db_info)
+        # (2) refresh whenever the user switches to a tab
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _on_tab_changed(self, _event=None):
+        self.mysql_controller.update_db_info()
+
     def center_window(self):
         self.root.update_idletasks()
         width = self.root.winfo_width()

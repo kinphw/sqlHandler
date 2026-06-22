@@ -24,6 +24,24 @@ class ConnectionManager:
         self._eff_host = ""
         self._eff_port = 3306
 
+        # Observers notified whenever the connection state changes
+        self._listeners = []
+
+    # ------------------------------------------------------------------
+    # Connection-state observers
+    # ------------------------------------------------------------------
+    def add_listener(self, callback):
+        """Register a no-arg callback fired on connect/release (call from main thread)."""
+        if callback not in self._listeners:
+            self._listeners.append(callback)
+
+    def notify_listeners(self):
+        for cb in list(self._listeners):
+            try:
+                cb()
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Configuration
     # ------------------------------------------------------------------
